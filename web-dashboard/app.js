@@ -176,13 +176,9 @@ function startDemoSimulation() {
         const waterTemp = 88.0 + 3.0 * Math.sin(simTime * 0.1);
         const oilTemp = 92.0 + 4.0 * Math.sin(simTime * 0.08);
         const batteryV = 13.8 + 0.3 * Math.sin(simTime * 0.5);
-        const steering = Math.round(60.0 * Math.sin(simTime * 0.4));
-        const brake = Math.round(Math.max(0, Math.sin(simTime * 0.8 + 1.5)) * 30);
-        const nowMs = Math.round(simTime * 1000);
-
-        // 1. Steering & Cornering Differential Calculation
         const steering = Math.round(140.0 * Math.sin(simTime * 0.35)); // -140° to +140°
         const cornerSlip = (steering / 140.0) * 3.5; // Outer wheels spin faster in corners!
+        const nowMs = Math.round(simTime * 1000);
 
         // 2. Wheel speeds simulation (Front launch spin + Cornering differential)
         let launchSpin = (throttle > 65) ? (throttle - 65) * 0.18 : 0;
@@ -670,7 +666,7 @@ function renderTelemetryChart() {
 }
 
 // =========================================================================
-// RAW CAN SNIFFER TABLE UPDATER
+// RAW CAN SNIFFER TABLE & RECORDING PARSER
 // =========================================================================
 function parseRawCanFrame(line) {
     const parts = line.split(',');
@@ -680,12 +676,13 @@ function parseRawCanFrame(line) {
     const canId = parts[2];
     const rtr = parts[3];
     const dlc = parts[4];
-    const bytes = parts.slice(5).join(' ');
+    const byteList = parts.slice(5);
+    const bytesFormatted = byteList.join(' ');
 
     const now = Date.now();
     let entry = canFrameMap.get(canId);
     if (!entry) {
-        entry = { canId, dlc, bytes, count: 1, lastTime: now, freq: 0, ts: timestamp };
+        entry = { canId, dlc, bytes: bytesFormatted, count: 1, lastTime: now, freq: 0, ts: timestamp };
         canFrameMap.set(canId, entry);
     } else {
         entry.count++;
@@ -695,8 +692,15 @@ function parseRawCanFrame(line) {
             entry.lastTime = now;
         }
         entry.dlc = dlc;
-        entry.bytes = bytes;
+        entry.bytes = bytesFormatted;
         entry.ts = timestamp;
+    }
+
+    // LOG PURE RAW CAN FRAME TO RECORDING BUFFER
+    if (isRecording) {
+        const isoTs = new Date().toISOString();
+        const commaBytes = byteList.join(',');
+        recordedPackets.push(`${isoTs},${timestamp},${canId},${rtr},${dlc},${commaBytes}`);
     }
 
     renderSnifferTable();
@@ -731,18 +735,24 @@ btnRecord.addEventListener('click', () => {
 function startRecording() {
     isRecording = true;
     recordedPackets = [];
-    recordedPackets.push('ISO_Timestamp,Raw_Payload');
+    // RAW CAN LOG CSV HEADER
+    recordedPackets.push('ISO_Timestamp,Gateway_Time_ms,CAN_ID,RTR,DLC,Byte0,Byte1,Byte2,Byte3,Byte4,Byte5,Byte6,Byte7');
     recordStartTime = Date.now();
 
+    // Tell ESP32 Gateway to stream RAW CAN frames over connection if connected
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        sendCommand('MODE:RAW');
+    }
+
     btnRecord.className = 'btn btn-record recording';
-    recordLabel.textContent = 'Stop & Save';
+    recordLabel.textContent = 'Stop & Save RAW Log';
     recordTimer.style.display = 'inline';
 
     recordTimerInterval = setInterval(() => {
         const elapsedSec = Math.floor((Date.now() - recordStartTime) / 1000);
         const mins = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
         const secs = String(elapsedSec % 60).padStart(2, '0');
-        recordTimer.textContent = `${mins}:${secs} (${recordedPackets.length - 1})`;
+        recordTimer.textContent = `${mins}:${secs} (${recordedPackets.length - 1} frames)`;
     }, 500);
 }
 
@@ -750,12 +760,17 @@ function stopRecording() {
     isRecording = false;
     clearInterval(recordTimerInterval);
 
+    // Switch Gateway back to TELEMETRY mode if connected
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        sendCommand('MODE:PLOT');
+    }
+
     btnRecord.className = 'btn btn-record';
     recordLabel.textContent = 'Start Record';
     recordTimer.style.display = 'none';
 
     if (recordedPackets.length <= 1) {
-        alert('No data recorded.');
+        alert('No Raw CAN frames recorded.');
         return;
     }
 
@@ -764,7 +779,7 @@ function stopRecording() {
     const url = URL.createObjectURL(blob);
 
     const nowStr = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `espDash_can_log_${nowStr}.csv`;
+    const filename = `espDash_raw_can_log_${nowStr}.csv`;
 
     const a = document.createElement('a');
     a.href = url;
@@ -773,6 +788,6 @@ function stopRecording() {
     a.click();
     document.body.removeChild(a);
 
+    console.log(`[Recording] Saved ${recordedPackets.length - 1} Raw CAN frames to ${filename}`);
     recordedPackets = [];
-    console.log(`[Recording] Exported ${filename} successfully.`);
 }
