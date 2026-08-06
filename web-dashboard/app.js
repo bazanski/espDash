@@ -60,6 +60,10 @@ const MAX_SNIFFER_ROWS = 500;
 // Gear Label Mapper
 const GEAR_MAP = ['P', 'R', 'N', 'D', 'S', '1', '2', '3', '4', '5', '6'];
 
+// Simulation Variables
+let simInterval = null;
+let simTime = 0;
+
 // =========================================================================
 // CONNECT & DISCONNECT CONTROLLER
 // =========================================================================
@@ -68,13 +72,101 @@ btnConnect.addEventListener('click', async () => {
         disconnect();
     } else {
         const mode = connectionMode.value;
-        if (mode === 'websocket') {
+        if (mode === 'demo') {
+            startDemoSimulation();
+        } else if (mode === 'websocket') {
             connectWebSocket();
         } else if (mode === 'webserial') {
             await connectWebSerial();
         }
     }
 });
+
+// =========================================================================
+// DEMO / TELEMETRY SIMULATION ENGINE
+// =========================================================================
+function startDemoSimulation() {
+    setConnectedState(true);
+    statusText.textContent = 'Simulating Telemetry';
+    simTime = 0;
+
+    simInterval = setInterval(() => {
+        simTime += 0.05;
+
+        // Smooth RPM Sweep (750 to 7400 RPM with gear shifts)
+        const cycle = (simTime % 12.0) / 12.0; // 12 second acceleration cycle
+        let rpm = 0;
+        let gearIdx = 3;
+        let speed = 0;
+
+        if (cycle < 0.2) {
+            gearIdx = 1; // 1st Gear
+            rpm = 1000 + (cycle / 0.2) * 5800; // 1000 - 6800
+            speed = (rpm / 6800) * 35;
+        } else if (cycle < 0.45) {
+            gearIdx = 2; // 2nd Gear
+            const progress = (cycle - 0.2) / 0.25;
+            rpm = 3200 + progress * 4000; // 3200 - 7200 (Shift Warning!)
+            speed = 35 + progress * 35;
+        } else if (cycle < 0.75) {
+            gearIdx = 3; // 3rd Gear
+            const progress = (cycle - 0.45) / 0.30;
+            rpm = 3800 + progress * 3400; // 3800 - 7200
+            speed = 70 + progress * 40;
+        } else {
+            gearIdx = 4; // 4th Gear Cruising
+            const progress = (cycle - 0.75) / 0.25;
+            rpm = 3500 - progress * 1000; // 3500 - 2500
+            speed = 110 - progress * 20;
+        }
+
+        const throttle = Math.round(Math.max(0, Math.sin(simTime * 1.5)) * 100);
+        const waterTemp = 88.0 + 3.0 * Math.sin(simTime * 0.1);
+        const oilTemp = 92.0 + 4.0 * Math.sin(simTime * 0.08);
+        const batteryV = 13.8 + 0.3 * Math.sin(simTime * 0.5);
+        const steering = Math.round(60.0 * Math.sin(simTime * 0.4));
+        const brake = Math.round(Math.max(0, Math.sin(simTime * 0.8 + 1.5)) * 30);
+        const nowMs = Math.round(simTime * 1000);
+
+        const telemetryData = {
+            type: 'telemetry',
+            rpm: Math.round(rpm),
+            speed: parseFloat(speed.toFixed(1)),
+            water_temp: parseFloat(waterTemp.toFixed(1)),
+            oil_temp: parseFloat(oilTemp.toFixed(1)),
+            battery_v: parseFloat(batteryV.toFixed(2)),
+            gear: gearIdx,
+            fuel: 76,
+            throttle: throttle,
+            steering: steering,
+            brake: brake,
+            ambient: 22,
+            timestamp: nowMs
+        };
+
+        // Update Gauges
+        updateTelemetryUI(telemetryData);
+
+        // Record data if recording active
+        if (isRecording) {
+            recordedPackets.push(`${new Date().toISOString()},${JSON.stringify(telemetryData)}`);
+        }
+
+        // Generate Simulated Raw CAN Frames for Sniffer Table
+        const rpmHex1 = ((Math.round(rpm) >> 8) & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+        const rpmHex2 = (Math.round(rpm) & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x17C,0,8,00,00,${rpmHex1},${rpmHex2},00,00,00,19`);
+
+        const spdHex = Math.round(speed * 2).toString(16).padStart(2, '0').toUpperCase();
+        const gearHex = gearIdx.toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x156,0,5,FF,${spdHex},00,02,${gearHex}`);
+
+        parseRawCanFrame(`RAW,${nowMs},0x1A4,0,8,00,${throttle.toString(16).padStart(2,'0').toUpperCase()},00,00,00,00,00,3A`);
+        parseRawCanFrame(`RAW,${nowMs},0x1D0,0,8,00,80,00,00,00,00,00,0A`);
+        parseRawCanFrame(`RAW,${nowMs},0x309,0,8,00,8A,00,00,00,00,00,0C`);
+
+    }, 50);
+}
 
 function setConnectedState(connected) {
     isConnected = connected;
