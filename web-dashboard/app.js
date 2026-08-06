@@ -180,6 +180,18 @@ function startDemoSimulation() {
         const brake = Math.round(Math.max(0, Math.sin(simTime * 0.8 + 1.5)) * 30);
         const nowMs = Math.round(simTime * 1000);
 
+        // Wheel speeds simulation (with front wheel spin during hard acceleration)
+        let slipOffset = (throttle > 70) ? (throttle - 70) * 0.15 : 0;
+        let w_fl = speed + slipOffset;
+        let w_fr = speed + slipOffset * 0.9;
+        let w_rl = speed;
+        let w_rr = speed;
+
+        // Warning flags simulation
+        let isBrakeSw = (throttle < 5 && speed > 20 && (simTime % 12 > 9));
+        let isTC = (slipOffset > 3.0);
+        let isABS = (isBrakeSw && speed > 50);
+
         const telemetryData = {
             type: 'telemetry',
             rpm: Math.round(rpm),
@@ -189,10 +201,19 @@ function startDemoSimulation() {
             battery_v: parseFloat(batteryV.toFixed(2)),
             gear: gearIdx,
             fuel: 76,
-            throttle: throttle,
-            steering: steering,
-            brake: brake,
+            throttle: Math.round(throttle),
+            steering: Math.round(steering),
+            brake: isBrakeSw ? 35 : 0,
             ambient: 22,
+            abs: isABS,
+            tc: isTC,
+            brake_sw: isBrakeSw,
+            cel: false,
+            vsa_warn: isTC,
+            w_fl: parseFloat(w_fl.toFixed(1)),
+            w_fr: parseFloat(w_fr.toFixed(1)),
+            w_rl: parseFloat(w_rl.toFixed(1)),
+            w_rr: parseFloat(w_rr.toFixed(1)),
             timestamp: nowMs
         };
 
@@ -462,7 +483,47 @@ function updateTelemetryUI(data) {
     valBrake.textContent = `${data.brake || 0} Bar`;
     valAmbient.textContent = `${data.ambient || 0} °C`;
 
-    // 6. Push to Chart History & Render Plot
+    // 6. System Warning Badges
+    const badgeCEL = document.getElementById('badgeCEL');
+    const badgeABS = document.getElementById('badgeABS');
+    const badgeTC = document.getElementById('badgeTC');
+    const badgeVSA = document.getElementById('badgeVSA');
+    const badgeBrakeSw = document.getElementById('badgeBrakeSw');
+
+    if (badgeCEL) badgeCEL.className = data.cel ? 'status-badge status-on-alert' : 'status-badge status-off';
+    if (badgeABS) badgeABS.className = data.abs ? 'status-badge status-on-alert' : 'status-badge status-off';
+    if (badgeTC) badgeTC.className = data.tc ? 'status-badge status-on-warn' : 'status-badge status-off';
+    if (badgeVSA) badgeVSA.className = data.vsa_warn ? 'status-badge status-on-warn' : 'status-badge status-off';
+    if (badgeBrakeSw) badgeBrakeSw.className = data.brake_sw ? 'status-badge status-on-info' : 'status-badge status-off';
+
+    // 7. Individual 4-Wheel Speeds (FL, FR, RL, RR)
+    const valWheelFL = document.getElementById('valWheelFL');
+    const valWheelFR = document.getElementById('valWheelFR');
+    const valWheelRL = document.getElementById('valWheelRL');
+    const valWheelRR = document.getElementById('valWheelRR');
+    const slipStatus = document.getElementById('slipStatus');
+
+    const wFL = data.w_fl !== undefined ? data.w_fl : (data.speed || 0);
+    const wFR = data.w_fr !== undefined ? data.w_fr : (data.speed || 0);
+    const wRL = data.w_rl !== undefined ? data.w_rl : (data.speed || 0);
+    const wRR = data.w_rr !== undefined ? data.w_rr : (data.speed || 0);
+
+    if (valWheelFL) valWheelFL.textContent = wFL.toFixed(1);
+    if (valWheelFR) valWheelFR.textContent = wFR.toFixed(1);
+    if (valWheelRL) valWheelRL.textContent = wRL.toFixed(1);
+    if (valWheelRR) valWheelRR.textContent = wRR.toFixed(1);
+
+    // Detect wheel slip (diff > 5 km/h)
+    const speeds = [wFL, wFR, wRL, wRR];
+    const maxSpd = Math.max(...speeds);
+    const minSpd = Math.min(...speeds);
+    if (maxSpd > 10 && (maxSpd - minSpd) > 4.5) {
+        if (slipStatus) slipStatus.style.display = 'inline-block';
+    } else {
+        if (slipStatus) slipStatus.style.display = 'none';
+    }
+
+    // 8. Push to Chart History & Render Plot
     chartHistory.push(data);
     if (chartHistory.length > MAX_CHART_POINTS) {
         chartHistory.shift();

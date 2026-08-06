@@ -8,16 +8,17 @@ Reverse-engineered from live 500 kbps F-CAN bus dumps.
 
 | CAN ID | Frequency | Parameter Name | Decoding Formula / Unit | Sample Raw Hex | Live Value |
 | :---: | :---: | :--- | :--- | :--- | :--- |
-| **`0x17C`** | 100 Hz | **Engine Speed & Brake Switch** | `(Byte[2] << 8) \| Byte[3]` (RPM), `Byte[0] & 0x20` (Brake Switch) | `20 00 02 BD 00 00 00 19` | **701 RPM**, Brake Pressed |
+| **`0x17C`** | 100 Hz | **Engine Speed, Brake & CEL** | `(Byte[2] << 8) \| Byte[3]` (RPM), `Byte[0] & 0x02` (CEL Check Engine Light), `Byte[0] & 0x20` (Brake Switch) | `22 00 02 BD 00 00 00 19` | **701 RPM**, CEL OFF, Brake Pressed |
 | **`0x156`** | 50 Hz | **Speed, Selector & Paddle Gear**| `Byte[1] / 2` (km/h), `Byte[4]` (P=0/1, R=2, N=3, D=4, S=5, Paddles 1-6=6-11) | `FF B8 00 02 07 3F` | **0 km/h (P / R / N / D / S / 1-6)** |
 | **`0x1A4`** | 50 Hz | **Throttle Position / Load** | `Byte[1]` (0–255 scale) | `00 66 00 00 00 00 00 3A` | **40 %** |
 | **`0x091`** | 50 Hz | **Calculated Engine Load** | `Byte[0]` (%) | `80 2C 87 ED FF 00 00 2E` | **50.1 %** |
 | **`0x1D0`** | 10 Hz | **Coolant Temperature** | `Byte[0] - 40` (°C) | `00 80 00 00 00 00 00 0A` | **88.0 °C** |
 | **`0x1AA`** | 50 Hz | **Steering Wheel Angle** | `(int16_t)((Byte[0]<<8)\|Byte[1])` (deg) | `7F FF 00 00 00 00 66 30` | **0.0°** |
 | **`0x1B0`** | 50 Hz | **Hydraulic Brake Pressure** | `Byte[1]` (0–150 Bar) | `00 0F 00 00 00 00 3A` | **15 Bar** |
-| **`0x1A0`** | 50 Hz | **VSA / ABS & TC Activity** | `Byte[0] & 0x02` (TC Active), `Byte[1] & 0x08` (ABS Active) | `02 08 00 00 00 00 00 00` | **ABS Engaged / TC Engaged** |
-| **`0x200`** | 50 Hz | **Front FL & FR Wheel Speeds**| `(Byte[0]<<8)\|Byte[1]` / 10.0 (km/h) | `00 00 00 00 00 00` | **0.0 km/h** |
-| **`0x201`** | 50 Hz | **Rear RL & RR Wheel Speeds** | `(Byte[0]<<8)\|Byte[1]` / 10.0 (km/h) | `00 00 00 00 00 00` | **0.0 km/h** |
+| **`0x1A0`** | 50 Hz | **VSA / ABS / TC & Warnings**| `Byte[0] & 0x02` (TC Active), `Byte[0] & 0x04` (VSA Warning), `Byte[1] & 0x08` (ABS Active), `Byte[1] & 0x01` (ABS Fault) | `02 08 00 00 00 00 00 00` | **ABS Engaged / TC Engaged / Warnings** |
+| **`0x200`** | 50 Hz | **Front Left & Right Wheel Speeds**| `((Byte[0]<<8)\|Byte[1]) / 10.0` (FL), `((Byte[2]<<8)\|Byte[3]) / 10.0` (FR km/h) | `00 00 00 00 00 00` | **0.0 km/h (FL / FR)** |
+| **`0x201`** | 50 Hz | **Rear Left & Right Wheel Speeds** | `((Byte[0]<<8)\|Byte[1]) / 10.0` (RL), `((Byte[2]<<8)\|Byte[3]) / 10.0` (RR km/h) | `00 00 00 00 00 00` | **0.0 km/h (RL / RR)** |
+| **`0x158`** | 10 Hz | **Oil Pressure Warning & Temp** | `Byte[0] & 0x01` (Low Oil Pressure Warning Light) | `01 00 00 00 80` | **Low Oil Pressure Warning** |
 | **`0x1DC`** | 20 Hz | **Target Idle Setpoint** | `(Byte[1] << 8) \| Byte[2]` (RPM) | `02 02 BC 30` | **700 RPM Target** |
 | **`0x13C`** | 10 Hz | **Fuel Tank Level & Range**| `Byte[1]` (Fuel Level %) | `00 4D 00 98 00 00 04 20` | **77 % Fuel** |
 | **`0x305`** | 5 Hz | **Ambient Outdoor Air Temp**| `Byte[0] - 40` (°C) | `8E 14 00 00 00 00 05` | **22.0 °C** |

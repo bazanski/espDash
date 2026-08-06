@@ -523,3 +523,101 @@ table.sniffer-table tr:hover {
     color: var(--accent-green);
     letter-spacing: 1px;
 }
+
+/* STATUS WARNING BADGES */
+.status-badges-container {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-top: 0.8rem;
+}
+
+.status-badge {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-heading);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-muted);
+    transition: all 0.2s ease;
+}
+
+.status-badge.status-on-warn {
+    background: rgba(255, 170, 0, 0.15);
+    border-color: rgba(255, 170, 0, 0.5);
+    color: var(--accent-amber);
+    box-shadow: 0 0 12px rgba(255, 170, 0, 0.3);
+}
+
+.status-badge.status-on-alert {
+    background: rgba(255, 0, 85, 0.18);
+    border-color: rgba(255, 0, 85, 0.6);
+    color: var(--accent-crimson);
+    box-shadow: 0 0 12px rgba(255, 0, 85, 0.4);
+    animation: badgePulse 1.2s infinite;
+}
+
+.status-badge.status-on-info {
+    background: rgba(0, 240, 255, 0.15);
+    border-color: rgba(0, 240, 255, 0.5);
+    color: var(--accent-cyan);
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.3);
+}
+
+@keyframes badgePulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.03); opacity: 0.85; }
+}
+
+/* 4-WHEEL INDIVIDUAL SPEEDS GRID */
+.wheel-speeds-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-top: 0.8rem;
+}
+
+.wheel-box {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 1rem;
+    text-align: center;
+    transition: all 0.3s ease;
+}
+
+.wheel-box.wheel-slipping {
+    border-color: var(--accent-amber);
+    background: rgba(255, 170, 0, 0.1);
+    box-shadow: 0 0 15px rgba(255, 170, 0, 0.3);
+}
+
+.wheel-label {
+    font-family: var(--font-heading);
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: 1px;
+    margin-bottom: 0.4rem;
+}
+
+.wheel-speed-val {
+    font-family: var(--font-gauge);
+    font-size: 2.2rem;
+    font-weight: 900;
+    color: var(--accent-cyan);
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+}
+
+.wheel-unit {
+    font-family: var(--font-heading);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.2rem;
+}

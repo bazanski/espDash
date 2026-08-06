@@ -167,6 +167,66 @@
             </div>
         </div>
 
+        <!-- VEHICLE HEALTH & SYSTEM WARNING BADGES BAR -->
+        <section class="card" style="margin-top: 1rem;">
+            <div class="card-title">
+                <span>Vehicle System Warnings & Status</span>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">Direct CAN Diagnosis</span>
+            </div>
+            <div class="status-badges-container">
+                <div id="badgeCEL" class="status-badge status-off">
+                    <span class="badge-icon">⚠️</span>
+                    <span class="badge-text">CEL (ENGINE)</span>
+                </div>
+                <div id="badgeABS" class="status-badge status-off">
+                    <span class="badge-icon">🛑</span>
+                    <span class="badge-text">ABS SYSTEM</span>
+                </div>
+                <div id="badgeTC" class="status-badge status-off">
+                    <span class="badge-icon">⚡</span>
+                    <span class="badge-text">TC / VSA ACTIVE</span>
+                </div>
+                <div id="badgeVSA" class="status-badge status-off">
+                    <span class="badge-icon">⚠️</span>
+                    <span class="badge-text">VSA WARNING</span>
+                </div>
+                <div id="badgeBrakeSw" class="status-badge status-off">
+                    <span class="badge-icon">🦶</span>
+                    <span class="badge-text">BRAKE PEDAL</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4-WHEEL INDIVIDUAL SPEEDS VISUALIZER -->
+        <section class="card" style="margin-top: 1rem;">
+            <div class="card-title">
+                <span>Individual 4-Wheel Speeds (50Hz CAN 0x200 / 0x201)</span>
+                <span id="slipStatus" style="color: var(--accent-amber); font-weight:700; font-size: 0.85rem; display:none;">⚠️ WHEEL SLIP DETECTED</span>
+            </div>
+            <div class="wheel-speeds-grid">
+                <div class="wheel-box fl">
+                    <div class="wheel-label">FRONT LEFT (FL)</div>
+                    <div id="valWheelFL" class="wheel-speed-val">0.0</div>
+                    <div class="wheel-unit">KM/H</div>
+                </div>
+                <div class="wheel-box fr">
+                    <div class="wheel-label">FRONT RIGHT (FR)</div>
+                    <div id="valWheelFR" class="wheel-speed-val">0.0</div>
+                    <div class="wheel-unit">KM/H</div>
+                </div>
+                <div class="wheel-box rl">
+                    <div class="wheel-label">REAR LEFT (RL)</div>
+                    <div id="valWheelRL" class="wheel-speed-val">0.0</div>
+                    <div class="wheel-unit">KM/H</div>
+                </div>
+                <div class="wheel-box rr">
+                    <div class="wheel-label">REAR RIGHT (RR)</div>
+                    <div id="valWheelRR" class="wheel-speed-val">0.0</div>
+                    <div class="wheel-unit">KM/H</div>
+                </div>
+            </div>
+        </section>
+
     </main>
 
     <!-- BOTTOM TABBED PANEL: TELEMETRY PLOT & RAW CAN SNIFFER -->

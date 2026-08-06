@@ -59,6 +59,10 @@ static OperationalMode current_mode = MODE_TELEMETRY;
 static uint8_t live_throttle_pct = 0;
 static uint8_t live_engine_load_pct = 0;
 static uint8_t live_brake_bar = 0;
+static uint16_t live_wheel_fl_x10 = 0;
+static uint16_t live_wheel_fr_x10 = 0;
+static uint16_t live_wheel_rl_x10 = 0;
+static uint16_t live_wheel_rr_x10 = 0;
 static uint32_t total_can_frames_received = 0;
 
 // Timing counters
@@ -286,7 +290,7 @@ void loop() {
         // HONDA CIVIC 9TH GEN CAN DECODING ENGINE
         // -----------------------------------------------------------------
 
-        // A. 0x17C - Engine Speed RPM & Brake Switch (100Hz)
+        // A. 0x17C - Engine Speed RPM, Brake Switch & Check Engine Light (100Hz)
         if (id == 0x17C && dlc >= 4) {
             uint16_t raw_rpm = ((uint16_t)rx_msg.data[2] << 8) | rx_msg.data[3];
             if (raw_rpm < 9000) {
@@ -297,9 +301,14 @@ void loop() {
             } else {
                 current_telemetry.flags &= ~0x20;
             }
+            if (rx_msg.data[0] & 0x02) {
+                current_telemetry.flags |= 0x40; // CEL (Check Engine Light) ON
+            } else {
+                current_telemetry.flags &= ~0x40;
+            }
         }
 
-        // H2. 0x1A0 - VSA / ABS & Traction Control Flags (50Hz)
+        // H2. 0x1A0 - VSA / ABS & Traction Control Flags & Warnings (50Hz)
         if (id == 0x1A0 && dlc >= 2) {
             if (rx_msg.data[1] & 0x08) {
                 current_telemetry.flags |= 0x08; // ABS Active
@@ -311,6 +320,23 @@ void loop() {
             } else {
                 current_telemetry.flags &= ~0x10;
             }
+            if (rx_msg.data[0] & 0x04) {
+                current_telemetry.flags |= 0x80; // VSA / TC Warning Light
+            } else {
+                current_telemetry.flags &= ~0x80;
+            }
+        }
+
+        // I. 0x200 - Front Left & Front Right Wheel Speeds (50Hz)
+        if (id == 0x200 && dlc >= 4) {
+            live_wheel_fl_x10 = (uint16_t)((rx_msg.data[0] << 8) | rx_msg.data[1]);
+            live_wheel_fr_x10 = (uint16_t)((rx_msg.data[2] << 8) | rx_msg.data[3]);
+        }
+
+        // J. 0x201 - Rear Left & Rear Right Wheel Speeds (50Hz)
+        if (id == 0x201 && dlc >= 4) {
+            live_wheel_rl_x10 = (uint16_t)((rx_msg.data[0] << 8) | rx_msg.data[1]);
+            live_wheel_rr_x10 = (uint16_t)((rx_msg.data[2] << 8) | rx_msg.data[3]);
         }
 
         // B. 0x156 - Vehicle Speed (km/h) & Gear Selector Position (50Hz)
@@ -406,9 +432,9 @@ void loop() {
     if (current_mode == MODE_TELEMETRY && (now - last_plot_time >= 100)) {
         last_plot_time = now;
 
-        char json_buf[300];
+        char json_buf[400];
         snprintf(json_buf, sizeof(json_buf), 
-            "{\"type\":\"telemetry\",\"rpm\":%u,\"speed\":%.1f,\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,\"fuel\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,\"tc\":%s,\"brake_sw\":%s,\"ambient\":%d,\"timestamp\":%lu}\n",
+            "{\"type\":\"telemetry\",\"rpm\":%u,\"speed\":%.1f,\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,\"fuel\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,\"tc\":%s,\"brake_sw\":%s,\"cel\":%s,\"vsa_warn\":%s,\"w_fl\":%.1f,\"w_fr\":%.1f,\"w_rl\":%.1f,\"w_rr\":%.1f,\"ambient\":%d,\"timestamp\":%lu}\n",
             current_telemetry.rpm,
             current_telemetry.speed_kmh_x10 / 10.0f,
             current_telemetry.water_temp_x10 / 10.0f,
@@ -422,6 +448,12 @@ void loop() {
             (current_telemetry.flags & 0x08) ? "true" : "false",
             (current_telemetry.flags & 0x10) ? "true" : "false",
             (current_telemetry.flags & 0x20) ? "true" : "false",
+            (current_telemetry.flags & 0x40) ? "true" : "false",
+            (current_telemetry.flags & 0x80) ? "true" : "false",
+            live_wheel_fl_x10 / 10.0f,
+            live_wheel_fr_x10 / 10.0f,
+            live_wheel_rl_x10 / 10.0f,
+            live_wheel_rr_x10 / 10.0f,
             current_telemetry.ambient_temp,
             now
         );
