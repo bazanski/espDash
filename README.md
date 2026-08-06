@@ -38,7 +38,7 @@ Every device in the network features background **ArduinoOTA / WebOTA** for zero
 * `esp32-gauge-round.local` — XIAO Round Universal Gauge
 * `esp32-gauge-amoled.local` — 1.32" Round AMOLED Universal Touch Gauge
 * `esp32-gauge-147.local` — Waveshare ESP32-C6 1.47" LCD Universal Gauge
-* `esp32-shiftlight.local` — OLED Universal Gauge / Shift Light
+* `esp32-oled.local` — OLED Universal Gauge / Shift Light
 * `esp32-heltec-relay.local` — Heltec Meshtastic LoRa Bridge
 
 ---
