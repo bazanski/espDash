@@ -161,32 +161,57 @@
 
     </main>
 
-    <!-- BOTTOM TABBED PANEL: RAW CAN SNIFFER & LOGGING -->
+    <!-- BOTTOM TABBED PANEL: TELEMETRY PLOT & RAW CAN SNIFFER -->
     <section class="bottom-panel">
         <div class="tab-header">
-            <button id="tabSnifferBtn" class="tab-btn active">📡 Live Raw CAN Bus Sniffer</button>
-            <button id="tabToggleModeBtn" class="btn btn-primary" style="margin-left: auto; font-size: 0.8rem;">Switch Gateway Mode: PLOT / RAW</button>
+            <button id="tabPlotBtn" class="tab-btn active">📈 Live Telemetry Plot</button>
+            <button id="tabSnifferBtn" class="tab-btn">📡 Live Raw CAN Bus Sniffer</button>
+            <button id="tabToggleModeBtn" class="btn btn-primary" style="margin-left: auto; font-size: 0.8rem;">Gateway Mode: TELEMETRY (Click for RAW)</button>
         </div>
 
-        <div class="table-wrapper">
-            <table class="sniffer-table">
-                <thead>
-                    <tr>
-                        <th>Timestamp (ms)</th>
-                        <th>CAN ID (Hex)</th>
-                        <th>DLC</th>
-                        <th>Raw Hex Data</th>
-                        <th>Frequency</th>
-                    </tr>
-                </thead>
-                <tbody id="snifferTableBody">
-                    <tr>
-                        <td colspan="5" style="text-align: center; color: var(--text-dim); padding: 2rem;">
-                            Connect to Gateway to view live CAN frames...
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
+        <!-- TAB 1: LIVE TELEMETRY PLOT CANVAS -->
+        <div id="plotContainer" class="tab-content">
+            <div class="chart-legend" style="display: flex; gap: 1.5rem; font-family: var(--font-heading); font-size: 0.85rem; margin-bottom: 0.5rem; align-items: center;">
+                <span style="color: var(--accent-cyan); display: flex; align-items: center; gap: 0.4rem;">
+                    <span style="width:12px; height:3px; background:var(--accent-cyan); display:inline-block;"></span> RPM (0-9000)
+                </span>
+                <span style="color: #fff; display: flex; align-items: center; gap: 0.4rem;">
+                    <span style="width:12px; height:3px; background:#fff; display:inline-block;"></span> Speed (0-200 km/h)
+                </span>
+                <span style="color: var(--accent-green); display: flex; align-items: center; gap: 0.4rem;">
+                    <span style="width:12px; height:3px; background:var(--accent-green); display:inline-block;"></span> Coolant (°C)
+                </span>
+                <span style="color: var(--accent-amber); display: flex; align-items: center; gap: 0.4rem;">
+                    <span style="width:12px; height:3px; background:var(--accent-amber); display:inline-block;"></span> Throttle (%)
+                </span>
+            </div>
+            <div style="width: 100%; height: 260px; position: relative; background: rgba(0,0,0,0.5); border-radius: var(--radius-sm); border: 1px solid var(--border-color); padding: 0.5rem;">
+                <canvas id="telemetryChartCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- TAB 2: LIVE RAW CAN SNIFFER TABLE -->
+        <div id="snifferContainer" class="tab-content" style="display: none;">
+            <div class="table-wrapper">
+                <table class="sniffer-table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp (ms)</th>
+                            <th>CAN ID (Hex)</th>
+                            <th>DLC</th>
+                            <th>Raw Hex Data</th>
+                            <th>Frequency</th>
+                        </tr>
+                    </thead>
+                    <tbody id="snifferTableBody">
+                        <tr>
+                            <td colspan="5" style="text-align: center; color: var(--text-dim); padding: 2rem;">
+                                Connect to Gateway or start Demo Mode to view live CAN frames...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </section>
 

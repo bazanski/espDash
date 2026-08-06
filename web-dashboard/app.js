@@ -6,8 +6,7 @@
 const connectionMode = document.getElementById('connectionMode');
 const wsHost = document.getElementById('wsHost');
 const btnConnect = document.getElementById('btnConnect');
-const btnRecord = document.getElementById('recordLabel') ? document.getElementById('btnRecord') : null;
-const recordDot = document.getElementById('recordDot');
+const btnRecord = document.getElementById('btnRecord');
 const recordLabel = document.getElementById('recordLabel');
 const recordTimer = document.getElementById('recordTimer');
 const statusBadge = document.getElementById('statusBadge');
@@ -36,9 +35,14 @@ const valSteering = document.getElementById('valSteering');
 const valBrake = document.getElementById('valBrake');
 const valAmbient = document.getElementById('valAmbient');
 
-// Sniffer Table & Gateway Toggle
-const snifferTableBody = document.getElementById('snifferTableBody');
+// Tabs & Containers
+const tabPlotBtn = document.getElementById('tabPlotBtn');
+const tabSnifferBtn = document.getElementById('tabSnifferBtn');
 const tabToggleModeBtn = document.getElementById('tabToggleModeBtn');
+const plotContainer = document.getElementById('plotContainer');
+const snifferContainer = document.getElementById('snifferContainer');
+const snifferTableBody = document.getElementById('snifferTableBody');
+const chartCanvas = document.getElementById('telemetryChartCanvas');
 
 // State Variables
 let isConnected = false;
@@ -47,6 +51,10 @@ let serialPort = null;
 let serialReader = null;
 let gatewayMode = 'PLOT'; // PLOT or RAW
 
+// Simulation Variables
+let simInterval = null;
+let simTime = 0;
+
 // Recording State Variables
 let isRecording = false;
 let recordedPackets = [];
@@ -54,15 +62,41 @@ let recordStartTime = 0;
 let recordTimerInterval = null;
 
 // CAN ID Map for Sniffer Frequency calculation
-const canFrameMap = new Map(); // id -> { id, dlc, bytes, count, lastTime, freq }
-const MAX_SNIFFER_ROWS = 500;
+const canFrameMap = new Map();
 
 // Gear Label Mapper
 const GEAR_MAP = ['P', 'R', 'N', 'D', 'S', '1', '2', '3', '4', '5', '6'];
 
-// Simulation Variables
-let simInterval = null;
-let simTime = 0;
+// Chart Data History Buffer (Max 100 points)
+const chartHistory = [];
+const MAX_CHART_POINTS = 100;
+
+// Dynamic SVG Path Arc Length Calculation
+let tachArcLength = 360;
+if (tachFillArc) {
+    try {
+        tachArcLength = tachFillArc.getTotalLength();
+        tachFillArc.style.strokeDasharray = tachArcLength;
+        tachFillArc.style.strokeDashoffset = tachArcLength;
+    } catch (e) {}
+}
+
+// =========================================================================
+// TAB NAVIGATION CONTROLLER
+// =========================================================================
+tabPlotBtn.addEventListener('click', () => {
+    tabPlotBtn.classList.add('active');
+    tabSnifferBtn.classList.remove('active');
+    plotContainer.style.display = 'block';
+    snifferContainer.style.display = 'none';
+});
+
+tabSnifferBtn.addEventListener('click', () => {
+    tabSnifferBtn.classList.add('active');
+    tabPlotBtn.classList.remove('active');
+    snifferContainer.style.display = 'block';
+    plotContainer.style.display = 'none';
+});
 
 // =========================================================================
 // CONNECT & DISCONNECT CONTROLLER
@@ -82,6 +116,24 @@ btnConnect.addEventListener('click', async () => {
     }
 });
 
+function setConnectedState(connected) {
+    isConnected = connected;
+    if (connected) {
+        statusBadge.className = 'status-badge connected';
+        statusText.textContent = 'Connected';
+        btnConnect.textContent = 'Disconnect';
+        btnConnect.className = 'btn btn-danger';
+        btnRecord.disabled = false;
+    } else {
+        statusBadge.className = 'status-badge disconnected';
+        statusText.textContent = 'Disconnected';
+        btnConnect.textContent = 'Connect';
+        btnConnect.className = 'btn btn-primary';
+        btnRecord.disabled = true;
+        if (isRecording) stopRecording();
+    }
+}
+
 // =========================================================================
 // DEMO / TELEMETRY SIMULATION ENGINE
 // =========================================================================
@@ -100,21 +152,21 @@ function startDemoSimulation() {
         let speed = 0;
 
         if (cycle < 0.2) {
-            gearIdx = 1; // 1st Gear
+            gearIdx = 1;
             rpm = 1000 + (cycle / 0.2) * 5800; // 1000 - 6800
             speed = (rpm / 6800) * 35;
         } else if (cycle < 0.45) {
-            gearIdx = 2; // 2nd Gear
+            gearIdx = 2;
             const progress = (cycle - 0.2) / 0.25;
             rpm = 3200 + progress * 4000; // 3200 - 7200 (Shift Warning!)
             speed = 35 + progress * 35;
         } else if (cycle < 0.75) {
-            gearIdx = 3; // 3rd Gear
+            gearIdx = 3;
             const progress = (cycle - 0.45) / 0.30;
             rpm = 3800 + progress * 3400; // 3800 - 7200
             speed = 70 + progress * 40;
         } else {
-            gearIdx = 4; // 4th Gear Cruising
+            gearIdx = 4;
             const progress = (cycle - 0.75) / 0.25;
             rpm = 3500 - progress * 1000; // 3500 - 2500
             speed = 110 - progress * 20;
@@ -144,10 +196,10 @@ function startDemoSimulation() {
             timestamp: nowMs
         };
 
-        // Update Gauges
+        // Update Gauges & Plot
         updateTelemetryUI(telemetryData);
 
-        // Record data if recording active
+        // Record data if active
         if (isRecording) {
             recordedPackets.push(`${new Date().toISOString()},${JSON.stringify(telemetryData)}`);
         }
@@ -166,24 +218,6 @@ function startDemoSimulation() {
         parseRawCanFrame(`RAW,${nowMs},0x309,0,8,00,8A,00,00,00,00,00,0C`);
 
     }, 50);
-}
-
-function setConnectedState(connected) {
-    isConnected = connected;
-    if (connected) {
-        statusBadge.className = 'status-badge connected';
-        statusText.textContent = 'Connected';
-        btnConnect.textContent = 'Disconnect';
-        btnConnect.className = 'btn btn-danger';
-        btnRecord.disabled = false;
-    } else {
-        statusBadge.className = 'status-badge disconnected';
-        statusText.textContent = 'Disconnected';
-        btnConnect.textContent = 'Connect';
-        btnConnect.className = 'btn btn-primary';
-        btnRecord.disabled = true;
-        if (isRecording) stopRecording();
-    }
 }
 
 // =========================================================================
@@ -254,7 +288,7 @@ async function connectWebSerial() {
             if (value) {
                 buffer += value;
                 const lines = buffer.split('\n');
-                buffer = lines.pop(); // keep partial line
+                buffer = lines.pop();
                 for (const line of lines) {
                     parseIncomingLine(line);
                 }
@@ -267,6 +301,10 @@ async function connectWebSerial() {
 }
 
 function disconnect() {
+    if (simInterval) {
+        clearInterval(simInterval);
+        simInterval = null;
+    }
     if (socket) {
         socket.close();
         socket = null;
@@ -282,36 +320,32 @@ function disconnect() {
     setConnectedState(false);
 }
 
-// Send Command String to Gateway
 function sendCommand(cmd) {
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(cmd + '\n');
     }
 }
 
-// =========================================================================
-// GATEWAY MODE TOGGLE BUTTON (PLOT / RAW)
-// =========================================================================
+// Gateway Mode Toggle Button (PLOT / RAW)
 tabToggleModeBtn.addEventListener('click', () => {
     if (gatewayMode === 'PLOT') {
         gatewayMode = 'RAW';
         sendCommand('MODE:RAW');
-        tabToggleModeBtn.textContent = 'Gateway Mode: RAW SNIFFER (Click to switch to PLOT)';
+        tabToggleModeBtn.textContent = 'Gateway Mode: RAW SNIFFER (Click for TELEMETRY)';
     } else {
         gatewayMode = 'PLOT';
         sendCommand('MODE:PLOT');
-        tabToggleModeBtn.textContent = 'Gateway Mode: TELEMETRY PLOT (Click to switch to RAW)';
+        tabToggleModeBtn.textContent = 'Gateway Mode: TELEMETRY (Click for RAW)';
     }
 });
 
 // =========================================================================
-// DATA PARSER ENGINE (JSON & RAW CAN)
+// DATA PARSER ENGINE
 // =========================================================================
 function parseIncomingLine(line) {
     line = line.trim();
     if (!line) return;
 
-    // A. Parse Decoded Telemetry JSON
     if (line.startsWith('{') && line.endsWith('}')) {
         try {
             const data = JSON.parse(line);
@@ -319,30 +353,28 @@ function parseIncomingLine(line) {
                 updateTelemetryUI(data);
             }
         } catch (e) {}
-    } 
-    // B. Parse Raw CAN Frame Line ("RAW,timestamp,id,rtr,dlc,bytes...")
-    else if (line.startsWith('RAW,')) {
+    } else if (line.startsWith('RAW,')) {
         parseRawCanFrame(line);
     }
 
-    // Record data if recording is active
     if (isRecording) {
         recordedPackets.push(`${new Date().toISOString()},${line}`);
     }
 }
 
 // =========================================================================
-// TELEMETRY UI UPDATER
+// TELEMETRY UI & EXACT TACHOMETER ALIGNMENT UPDATER
 // =========================================================================
 function updateTelemetryUI(data) {
-    // 1. Tachometer (RPM)
+    // 1. Tachometer (RPM) & Mathematical Arc Alignment
     const rpm = data.rpm || 0;
     valRpm.textContent = rpm;
 
-    // Arc dashoffset: 377 is total length (0 RPM = 377, 9000 RPM = 0)
     const maxRpm = 9000;
     const rpmClamped = Math.min(Math.max(rpm, 0), maxRpm);
-    const dashOffset = 377 - (rpmClamped / maxRpm) * 377;
+
+    // Exact dashoffset calculation matching total arc length (0 RPM = full offset, 9000 RPM = 0 offset)
+    const dashOffset = tachArcLength - (rpmClamped / maxRpm) * tachArcLength;
     tachFillArc.style.strokeDashoffset = dashOffset;
 
     // Shift Light Alert (> 6800 RPM)
@@ -395,13 +427,102 @@ function updateTelemetryUI(data) {
     valSteering.textContent = `${data.steering || 0}°`;
     valBrake.textContent = `${data.brake || 0} Bar`;
     valAmbient.textContent = `${data.ambient || 0} °C`;
+
+    // 6. Push to Chart History & Render Plot
+    chartHistory.push(data);
+    if (chartHistory.length > MAX_CHART_POINTS) {
+        chartHistory.shift();
+    }
+    renderTelemetryChart();
 }
 
 // =========================================================================
-// RAW CAN SNIFFER TABLE UPDATER (MEMORY-SAFE RING BUFFER)
+// HTML5 CANVAS LIVE TELEMETRY PLOTTER
+// =========================================================================
+function renderTelemetryChart() {
+    if (!chartCanvas || plotContainer.style.display === 'none') return;
+
+    const ctx = chartCanvas.getContext('2d');
+    const width = chartCanvas.parentElement.clientWidth - 16;
+    const height = 240;
+
+    chartCanvas.width = width;
+    chartCanvas.height = height;
+
+    // Clear Canvas
+    ctx.clearRect(0, 0, width, height);
+
+    if (chartHistory.length < 2) return;
+
+    // Draw Grid Lines
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.lineWidth = 1;
+    for (let y = 0; y <= height; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+    }
+
+    const stepX = width / (MAX_CHART_POINTS - 1);
+
+    // 1. Draw RPM Line (Cyan, 0 - 9000 RPM)
+    ctx.beginPath();
+    ctx.strokeStyle = '#00f0ff';
+    ctx.lineWidth = 2.5;
+    chartHistory.forEach((pt, idx) => {
+        const x = idx * stepX;
+        const normRpm = (pt.rpm || 0) / 9000.0;
+        const y = height - normRpm * (height - 20) - 10;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // 2. Draw Speed Line (White, 0 - 200 km/h)
+    ctx.beginPath();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.0;
+    chartHistory.forEach((pt, idx) => {
+        const x = idx * stepX;
+        const normSpeed = (pt.speed || 0) / 200.0;
+        const y = height - normSpeed * (height - 20) - 10;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // 3. Draw Coolant Temp Line (Green, 0 - 150 °C)
+    ctx.beginPath();
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth = 1.8;
+    chartHistory.forEach((pt, idx) => {
+        const x = idx * stepX;
+        const normTemp = (pt.water_temp || 0) / 150.0;
+        const y = height - normTemp * (height - 20) - 10;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // 4. Draw Throttle Position Line (Amber, 0 - 100 %)
+    ctx.beginPath();
+    ctx.strokeStyle = '#ffaa00';
+    ctx.lineWidth = 1.5;
+    chartHistory.forEach((pt, idx) => {
+        const x = idx * stepX;
+        const normThr = (pt.throttle || 0) / 100.0;
+        const y = height - normThr * (height - 20) - 10;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+}
+
+// =========================================================================
+// RAW CAN SNIFFER TABLE UPDATER
 // =========================================================================
 function parseRawCanFrame(line) {
-    // RAW,timestamp,id,rtr,dlc,bytes...
     const parts = line.split(',');
     if (parts.length < 5) return;
 
@@ -432,6 +553,7 @@ function parseRawCanFrame(line) {
 }
 
 function renderSnifferTable() {
+    if (snifferContainer.style.display === 'none') return;
     let html = '';
     canFrameMap.forEach((val) => {
         html += `<tr>
@@ -487,7 +609,6 @@ function stopRecording() {
         return;
     }
 
-    // Generate CSV Blob & Instant Download
     const csvContent = recordedPackets.join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -502,7 +623,6 @@ function stopRecording() {
     a.click();
     document.body.removeChild(a);
 
-    // Flush Memory
     recordedPackets = [];
     console.log(`[Recording] Exported ${filename} successfully.`);
 }
