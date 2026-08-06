@@ -35,7 +35,7 @@ flowchart TD
         NODE1["Node 1: esp32-gauge-3inch.local\nWaveshare ESP32-S3-LCD-3.16\n(Universal Telemetry Gauge)"]
         NODE2["Node 2: esp32-gauge-round.local\nSeeed XIAO ESP32-S3 + JXL v1.1\n(Universal Circular Telemetry Gauge)"]
         NODE3["Node 3: esp32-gauge-amoled.local\nWaveshare ESP32-S3-Touch-AMOLED-1.32\n(Universal Round Touch Gauge)"]
-        NODE4["Node 4: esp32-gauge-147.local\nWaveshare ESP32-C6-LCD-1.47\n(Universal Telemetry Gauge)"]
+        NODE4["Node 4: esp32-gauge-147.local\nWaveshare ESP32-C6-LCD-1.47\n(Touch / Non-Touch TBD, Universal Gauge)"]
         NODE5["Node 5: esp32-oled.local\nGeneric ESP32-S3 + I2C OLED\n(Universal Gauge / Shift Light)"]
 
         ESPNOW_TX ==>|"ESP-NOW Peer-to-Peer Broadcast\n(~1-3ms latency, zero connection wait)"| NODE1

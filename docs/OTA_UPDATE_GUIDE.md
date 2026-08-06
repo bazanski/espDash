@@ -23,7 +23,7 @@ All nodes in **espDash** feature background **ArduinoOTA / WebOTA** so firmware 
 | **Display Node 1** | Waveshare ESP32-S3-LCD-3.16 | `esp32-gauge-3inch.local` | Universal Telemetry Gauge |
 | **Display Node 2** | XIAO ESP32-S3 + JXL Round | `esp32-gauge-round.local` | Universal Telemetry Gauge |
 | **Display Node 3** | Waveshare ESP32-S3-Touch-AMOLED-1.32 | `esp32-gauge-amoled.local` | Universal Touch Gauge |
-| **Display Node 4** | Waveshare ESP32-C6-LCD-1.47 | `esp32-gauge-147.local` | Universal Telemetry Gauge |
+| **Display Node 4** | Waveshare ESP32-C6-LCD-1.47 (Touch/Non-Touch TBD) | `esp32-gauge-147.local` | Universal Telemetry Gauge |
 | **Display Node 5** | Generic ESP32-S3 + OLED | `esp32-oled.local` | Universal Gauge / Shift Light |
 | **Relay Node 6** | Heltec V3/V4 Meshtastic ESP32-S3 | `esp32-heltec-relay.local` | Home Assistant LoRa Bridge |
 

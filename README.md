@@ -20,7 +20,7 @@
                ├───► 🏎️ Node 1: Waveshare ESP32-S3-LCD-3.16 (Universal Telemetry Gauge)
                ├───► 🏎️ Node 2: Seeed XIAO ESP32-S3 + JXL Round (Universal Telemetry Gauge)
                ├───► 🏎️ Node 3: Waveshare ESP32-S3-Touch-AMOLED-1.32 (Universal Touch Gauge)
-               ├───► 🏎️ Node 4: Waveshare ESP32-C6-LCD-1.47 (Universal Telemetry Gauge)
+               ├───► 🏎️ Node 4: Waveshare ESP32-C6-LCD-1.47 (Touch / Non-Touch TBD, Universal Gauge)
                ├───► 🏎️ Node 5: Generic ESP32-S3 + OLED (Universal Gauge / Shift Light)
                └───► 🏠 Node 6: Heltec V3/V4 Meshtastic Relay ──► Home Assistant
 ```
