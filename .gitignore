@@ -1,0 +1,15 @@
+# Agentsync state file (do not commit)
+.agent_state.md
+
+# Build output & IDEs
+.pio/
+.vscode/
+.idea/
+*.o
+*.elf
+*.bin
+*.hex
+
+# OS files
+.DS_Store
+Thumbs.db
