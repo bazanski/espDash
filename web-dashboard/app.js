@@ -180,17 +180,25 @@ function startDemoSimulation() {
         const brake = Math.round(Math.max(0, Math.sin(simTime * 0.8 + 1.5)) * 30);
         const nowMs = Math.round(simTime * 1000);
 
-        // Wheel speeds simulation (with front wheel spin during hard acceleration)
-        let slipOffset = (throttle > 70) ? (throttle - 70) * 0.15 : 0;
-        let w_fl = speed + slipOffset;
-        let w_fr = speed + slipOffset * 0.9;
-        let w_rl = speed;
-        let w_rr = speed;
+        // 1. Steering & Cornering Differential Calculation
+        const steering = Math.round(140.0 * Math.sin(simTime * 0.35)); // -140° to +140°
+        const cornerSlip = (steering / 140.0) * 3.5; // Outer wheels spin faster in corners!
 
-        // Warning flags simulation
-        let isBrakeSw = (throttle < 5 && speed > 20 && (simTime % 12 > 9));
-        let isTC = (slipOffset > 3.0);
-        let isABS = (isBrakeSw && speed > 50);
+        // 2. Wheel speeds simulation (Front launch spin + Cornering differential)
+        let launchSpin = (throttle > 65) ? (throttle - 65) * 0.18 : 0;
+        let w_fl = Math.max(0, speed + launchSpin - cornerSlip);
+        let w_fr = Math.max(0, speed + launchSpin * 0.9 + cornerSlip);
+        let w_rl = Math.max(0, speed - cornerSlip * 0.7);
+        let w_rr = Math.max(0, speed + cornerSlip * 0.7);
+
+        // 3. Braking & Warning flags simulation
+        let isBraking = (throttle < 5 && (simTime % 10 > 7.5));
+        let brakeBar = isBraking ? Math.round(25 + Math.sin(simTime * 2) * 20) : 0;
+        let isBrakeSw = isBraking || (brakeBar > 5);
+        let isTC = (launchSpin > 3.2);
+        let isABS = (isBraking && speed > 45 && brakeBar > 35);
+        let isCEL = (simTime > 40 && simTime < 46); // Periodic CEL demo pulse
+        let isVSA = isTC || isABS;
 
         const telemetryData = {
             type: 'telemetry',
@@ -200,16 +208,16 @@ function startDemoSimulation() {
             oil_temp: parseFloat(oilTemp.toFixed(1)),
             battery_v: parseFloat(batteryV.toFixed(2)),
             gear: gearIdx,
-            fuel: 76,
+            fuel: Math.max(10, Math.round(76 - simTime * 0.05)),
             throttle: Math.round(throttle),
             steering: Math.round(steering),
-            brake: isBrakeSw ? 35 : 0,
+            brake: brakeBar,
             ambient: 22,
             abs: isABS,
             tc: isTC,
             brake_sw: isBrakeSw,
-            cel: false,
-            vsa_warn: isTC,
+            cel: isCEL,
+            vsa_warn: isVSA,
             w_fl: parseFloat(w_fl.toFixed(1)),
             w_fr: parseFloat(w_fr.toFixed(1)),
             w_rl: parseFloat(w_rl.toFixed(1)),
@@ -225,18 +233,56 @@ function startDemoSimulation() {
             recordedPackets.push(`${new Date().toISOString()},${JSON.stringify(telemetryData)}`);
         }
 
-        // Generate Simulated Raw CAN Frames for Sniffer Table
-        const rpmHex1 = ((Math.round(rpm) >> 8) & 0xFF).toString(16).padStart(2, '0').toUpperCase();
-        const rpmHex2 = (Math.round(rpm) & 0xFF).toString(16).padStart(2, '0').toUpperCase();
-        parseRawCanFrame(`RAW,${nowMs},0x17C,0,8,00,00,${rpmHex1},${rpmHex2},00,00,00,19`);
+        // -----------------------------------------------------------------
+        // COMPLETE RAW CAN BUS STREAM SIMULATOR (14 CAN IDs)
+        // -----------------------------------------------------------------
+        const rpmVal = Math.round(rpm);
+        const rpmH1 = ((rpmVal >> 8) & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+        const rpmH2 = (rpmVal & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+        const celByte = (isCEL ? 0x02 : 0x00) | (isBrakeSw ? 0x20 : 0x00);
+        parseRawCanFrame(`RAW,${nowMs},0x17C,0,8,${celByte.toString(16).padStart(2,'0').toUpperCase()},00,${rpmH1},${rpmH2},00,00,00,19`);
 
-        const spdHex = Math.round(speed * 2).toString(16).padStart(2, '0').toUpperCase();
-        const gearHex = gearIdx.toString(16).padStart(2, '0').toUpperCase();
-        parseRawCanFrame(`RAW,${nowMs},0x156,0,5,FF,${spdHex},00,02,${gearHex}`);
+        const spdByte = Math.round(speed * 2).toString(16).padStart(2, '0').toUpperCase();
+        const gearByte = gearIdx.toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x156,0,5,FF,${spdByte},00,02,${gearByte}`);
 
-        parseRawCanFrame(`RAW,${nowMs},0x1A4,0,8,00,${throttle.toString(16).padStart(2,'0').toUpperCase()},00,00,00,00,00,3A`);
-        parseRawCanFrame(`RAW,${nowMs},0x1D0,0,8,00,80,00,00,00,00,00,0A`);
-        parseRawCanFrame(`RAW,${nowMs},0x309,0,8,00,8A,00,00,00,00,00,0C`);
+        const throtByte = Math.round(throttle).toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x1A4,0,8,00,${throtByte},00,00,00,00,00,3A`);
+
+        const loadByte = Math.round((throttle * 0.7) + 15).toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x091,0,8,${loadByte},2C,87,ED,FF,00,00,2E`);
+
+        const coolantByte = Math.round(waterTemp + 40).toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x1D0,0,8,${coolantByte},80,00,00,00,00,00,0A`);
+
+        const oilByte = Math.round(oilTemp + 40).toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x158,0,5,00,00,00,00,${oilByte}`);
+
+        const steerVal = Math.round(steering);
+        const steerH1 = ((steerVal >> 8) & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+        const steerH2 = (steerVal & 0xFF).toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x1AA,0,8,${steerH1},${steerH2},00,00,00,00,66,30`);
+
+        const brakeHex = brakeBar.toString(16).padStart(2, '0').toUpperCase();
+        parseRawCanFrame(`RAW,${nowMs},0x1B0,0,8,00,${brakeHex},00,00,00,00,00,3A`);
+
+        const vsaByte0 = (isTC ? 0x02 : 0x00) | (isVSA ? 0x04 : 0x00);
+        const vsaByte1 = (isABS ? 0x08 : 0x00);
+        parseRawCanFrame(`RAW,${nowMs},0x1A0,0,8,${vsaByte0.toString(16).padStart(2,'0').toUpperCase()},${vsaByte1.toString(16).padStart(2,'0').toUpperCase()},00,00,00,00,00,00`);
+
+        const flVal = Math.round(w_fl * 10);
+        const frVal = Math.round(w_fr * 10);
+        parseRawCanFrame(`RAW,${nowMs},0x200,0,4,${((flVal>>8)&0xFF).toString(16).padStart(2,'0').toUpperCase()},${(flVal&0xFF).toString(16).padStart(2,'0').toUpperCase()},${((frVal>>8)&0xFF).toString(16).padStart(2,'0').toUpperCase()},${(frVal&0xFF).toString(16).padStart(2,'0').toUpperCase()}`);
+
+        const rlVal = Math.round(w_rl * 10);
+        const rrVal = Math.round(w_rr * 10);
+        parseRawCanFrame(`RAW,${nowMs},0x201,0,4,${((rlVal>>8)&0xFF).toString(16).padStart(2,'0').toUpperCase()},${(rlVal&0xFF).toString(16).padStart(2,'0').toUpperCase()},${((rrVal>>8)&0xFF).toString(16).padStart(2,'0').toUpperCase()},${(rrVal&0xFF).toString(16).padStart(2,'0').toUpperCase()}`);
+
+        parseRawCanFrame(`RAW,${nowMs},0x13C,0,8,00,4D,00,98,00,00,04,20`);
+        parseRawCanFrame(`RAW,${nowMs},0x305,0,8,8E,14,00,00,00,00,05,00`);
+
+        const batVal = Math.round(batteryV * 10);
+        parseRawCanFrame(`RAW,${nowMs},0x309,0,8,00,${batVal.toString(16).padStart(2,'0').toUpperCase()},00,00,00,00,00,0C`);
 
     }, 50);
 }
@@ -354,7 +400,16 @@ function resetUI() {
         throttle: 0,
         steering: 0,
         brake: 0,
-        ambient: 0
+        ambient: 0,
+        abs: false,
+        tc: false,
+        brake_sw: false,
+        cel: false,
+        vsa_warn: false,
+        w_fl: 0,
+        w_fr: 0,
+        w_rl: 0,
+        w_rr: 0
     });
     valWaterTemp.textContent = '-- °C';
     valOilTemp.textContent = '-- °C';
