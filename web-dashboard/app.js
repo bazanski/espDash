@@ -318,6 +318,26 @@ function disconnect() {
         serialPort = null;
     }
     setConnectedState(false);
+    resetUI();
+}
+
+function resetUI() {
+    updateTelemetryUI({
+        rpm: 0,
+        speed: 0,
+        water_temp: -20,
+        oil_temp: -20,
+        battery_v: 0,
+        gear: 0,
+        fuel: 0,
+        throttle: 0,
+        steering: 0,
+        brake: 0,
+        ambient: 0
+    });
+    valWaterTemp.textContent = '-- °C';
+    valOilTemp.textContent = '-- °C';
+    valAmbient.textContent = '-- °C';
 }
 
 function sendCommand(cmd) {
