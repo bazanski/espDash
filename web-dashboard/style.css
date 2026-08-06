@@ -1,0 +1,525 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap');
+
+:root {
+    --bg-dark: #07090e;
+    --bg-card: rgba(18, 23, 35, 0.75);
+    --bg-card-hover: rgba(26, 33, 50, 0.85);
+    --border-color: rgba(255, 255, 255, 0.08);
+    --border-glow: rgba(0, 240, 255, 0.25);
+    
+    --text-main: #f0f4f8;
+    --text-muted: #8a99ad;
+    --text-dim: #4d5b6d;
+
+    --accent-cyan: #00f0ff;
+    --accent-green: #00ff88;
+    --accent-amber: #ffaa00;
+    --accent-crimson: #ff0055;
+    --accent-purple: #9d4edd;
+
+    --font-ui: 'Inter', system-ui, sans-serif;
+    --font-heading: 'Rajdhani', sans-serif;
+    --font-gauge: 'Orbitron', monospace;
+
+    --radius-sm: 6px;
+    --radius-md: 12px;
+    --radius-lg: 20px;
+    --radius-full: 9999px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-dark);
+    background-image: 
+        radial-gradient(circle at 50% 0%, rgba(0, 240, 255, 0.05), transparent 70%),
+        radial-gradient(circle at 100% 100%, rgba(157, 78, 221, 0.04), transparent 50%);
+    color: var(--text-main);
+    font-family: var(--font-ui);
+    min-height: 100vh;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    overflow-x: hidden;
+}
+
+/* =========================================================================
+   HEADER & TOP CONTROL BAR
+   ========================================================================= */
+header.top-bar {
+    background: var(--bg-card);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 1rem 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.brand .logo-icon {
+    font-size: 1.8rem;
+    filter: drop-shadow(0 0 8px var(--accent-cyan));
+}
+
+.brand h1 {
+    font-family: var(--font-gauge);
+    font-size: 1.4rem;
+    letter-spacing: 1px;
+    background: linear-gradient(135deg, #fff, var(--accent-cyan));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.brand span.vehicle-tag {
+    font-family: var(--font-heading);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.05);
+    padding: 0.2rem 0.6rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+}
+
+.controls-group {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.input-field {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.8rem;
+    color: var(--text-main);
+    font-family: var(--font-gauge);
+    font-size: 0.85rem;
+    outline: none;
+    transition: all 0.2s ease;
+}
+
+.input-field:focus {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+}
+
+.btn {
+    font-family: var(--font-heading);
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 0.55rem 1.2rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(0, 240, 255, 0.05));
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+}
+
+.btn-primary:hover {
+    background: var(--accent-cyan);
+    color: #000;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.5);
+}
+
+.btn-danger {
+    background: linear-gradient(135deg, rgba(255, 0, 85, 0.2), rgba(255, 0, 85, 0.05));
+    border-color: var(--accent-crimson);
+    color: var(--accent-crimson);
+}
+
+.btn-danger:hover {
+    background: var(--accent-crimson);
+    color: #fff;
+    box-shadow: 0 0 15px rgba(255, 0, 85, 0.5);
+}
+
+.btn-record {
+    background: rgba(255, 170, 0, 0.1);
+    border-color: var(--accent-amber);
+    color: var(--accent-amber);
+}
+
+.btn-record.recording {
+    background: var(--accent-crimson);
+    border-color: var(--accent-crimson);
+    color: #fff;
+    animation: pulse-red 1.5s infinite;
+}
+
+@keyframes pulse-red {
+    0% { box-shadow: 0 0 0 0 rgba(255, 0, 85, 0.7); }
+    70% { box-shadow: 0 0 0 10px rgba(255, 0, 85, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 0, 85, 0); }
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-heading);
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+    border-radius: var(--radius-full);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+}
+
+.status-badge.connected .status-dot {
+    background: var(--accent-green);
+    box-shadow: 0 0 10px var(--accent-green);
+}
+
+.status-badge.disconnected .status-dot {
+    background: var(--accent-crimson);
+}
+
+/* =========================================================================
+   MAIN INSTRUMENT CLUSTER
+   ========================================================================= */
+main.dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1.5rem;
+}
+
+@media (max-width: 1200px) {
+    main.dashboard-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.card {
+    background: var(--bg-card);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    position: relative;
+    overflow: hidden;
+}
+
+.card-title {
+    font-family: var(--font-heading);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Tachometer Gauge */
+.tach-wrapper {
+    position: relative;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.tach-svg {
+    width: 100%;
+    max-width: 320px;
+    height: auto;
+}
+
+.tach-center-readout {
+    position: absolute;
+    top: 55%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+}
+
+.tach-rpm-val {
+    font-family: var(--font-gauge);
+    font-size: 3.2rem;
+    font-weight: 900;
+    color: #fff;
+    text-shadow: 0 0 20px rgba(0, 240, 255, 0.6);
+}
+
+.tach-rpm-unit {
+    font-family: var(--font-heading);
+    font-size: 1rem;
+    color: var(--accent-cyan);
+    letter-spacing: 2px;
+}
+
+.shift-alert-banner {
+    position: absolute;
+    top: 15%;
+    background: var(--accent-crimson);
+    color: #fff;
+    font-family: var(--font-gauge);
+    font-size: 0.9rem;
+    font-weight: 900;
+    padding: 0.3rem 1rem;
+    border-radius: var(--radius-sm);
+    letter-spacing: 2px;
+    display: none;
+    animation: flash 0.3s infinite alternate;
+}
+
+@keyframes flash {
+    0% { opacity: 1; }
+    100% { opacity: 0.2; }
+}
+
+/* Speedometer & Gear Display */
+.speed-gear-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 1.5rem;
+}
+
+.speed-val {
+    font-family: var(--font-gauge);
+    font-size: 5rem;
+    font-weight: 900;
+    color: #fff;
+    line-height: 1;
+    text-shadow: 0 0 30px rgba(255, 255, 255, 0.4);
+}
+
+.speed-unit {
+    font-family: var(--font-heading);
+    font-size: 1.2rem;
+    color: var(--text-muted);
+    letter-spacing: 2px;
+}
+
+.gear-badge-box {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+}
+
+.gear-badge {
+    width: 70px;
+    height: 70px;
+    border-radius: var(--radius-md);
+    background: rgba(0, 240, 255, 0.08);
+    border: 2px solid var(--accent-cyan);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-gauge);
+    font-size: 2.5rem;
+    font-weight: 900;
+    color: var(--accent-cyan);
+    box-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
+}
+
+/* Temperature Bars & Secondary Telemetry Grid */
+.temp-bars-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
+    justify-content: center;
+    height: 100%;
+}
+
+.temp-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.temp-header {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-heading);
+    font-size: 0.95rem;
+}
+
+.progress-track {
+    width: 100%;
+    height: 14px;
+    background: rgba(0, 0, 0, 0.5);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    position: relative;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+    border-radius: var(--radius-full);
+    transition: width 0.3s ease, background 0.3s ease;
+}
+
+.progress-fill.warning {
+    background: linear-gradient(90deg, var(--accent-amber), var(--accent-crimson));
+}
+
+.telemetry-cards-grid {
+    grid-column: span 3;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+}
+
+@media (max-width: 1200px) {
+    .telemetry-cards-grid {
+        grid-column: span 1;
+    }
+}
+
+.mini-card {
+    background: rgba(12, 16, 25, 0.6);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.mini-card-label {
+    font-family: var(--font-heading);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.mini-card-value {
+    font-family: var(--font-gauge);
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #fff;
+}
+
+/* =========================================================================
+   BOTTOM TABBED SNIFFER & LOGGING PANEL
+   ========================================================================= */
+section.bottom-panel {
+    background: var(--bg-card);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.tab-header {
+    display: flex;
+    gap: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.8rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.tab-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0.4rem 0.8rem;
+    border-radius: var(--radius-sm);
+    transition: all 0.2s ease;
+}
+
+.tab-btn.active {
+    color: var(--accent-cyan);
+    background: rgba(0, 240, 255, 0.1);
+}
+
+.table-wrapper {
+    max-height: 350px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.5);
+}
+
+table.sniffer-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-gauge);
+    font-size: 0.85rem;
+    text-align: left;
+}
+
+table.sniffer-table th {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+    padding: 0.75rem 1rem;
+    position: sticky;
+    top: 0;
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border-color);
+}
+
+table.sniffer-table td {
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    color: var(--text-main);
+}
+
+table.sniffer-table tr:hover {
+    background: rgba(0, 240, 255, 0.05);
+}
+
+.can-id-tag {
+    color: var(--accent-cyan);
+    font-weight: 700;
+}
+
+.can-data-tag {
+    color: var(--accent-green);
+    letter-spacing: 1px;
+}

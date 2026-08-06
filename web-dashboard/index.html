@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>espDash - Honda Civic 9th Gen Telemetry Dashboard</title>
+    <meta name="description" content="Distributed low-latency automotive telemetry and raw CAN bus sniffer dashboard for 2014 Honda Civic (9th Gen).">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- TOP CONTROL BAR -->
+    <header class="top-bar">
+        <div class="brand">
+            <span class="logo-icon">🏎️</span>
+            <h1>espDash</h1>
+            <span class="vehicle-tag">2014 Honda Civic 9th Gen</span>
+        </div>
+
+        <div class="controls-group">
+            <select id="connectionMode" class="input-field">
+                <option value="websocket">WebSocket (Wi-Fi)</option>
+                <option value="webserial">WebSerial (USB CDC)</option>
+            </select>
+
+            <input type="text" id="wsHost" class="input-field" value="esp32-gateway.local:8888" placeholder="esp32-gateway.local:8888">
+
+            <button id="btnConnect" class="btn btn-primary">Connect</button>
+
+            <!-- RAW CAN LOG RECORDING CONTROL -->
+            <button id="btnRecord" class="btn btn-record" disabled>
+                <span id="recordDot">⏺</span> <span id="recordLabel">Start Record</span>
+                <span id="recordTimer" style="display:none; font-family: var(--font-gauge); font-size: 0.85rem; margin-left: 0.3rem;">00:00</span>
+            </button>
+
+            <div id="statusBadge" class="status-badge disconnected">
+                <span class="status-dot"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- MAIN INSTRUMENT CLUSTER -->
+    <main class="dashboard-grid">
+
+        <!-- CARD 1: TACHOMETER (RPM GAUGE) -->
+        <section class="card">
+            <div class="card-title">
+                <span>Engine Speed</span>
+                <span id="shiftAlert" class="shift-alert-banner">SHIFT!</span>
+            </div>
+            
+            <div class="tach-wrapper">
+                <svg class="tach-svg" viewBox="0 0 200 200">
+                    <!-- Background Arc -->
+                    <path d="M 30 150 A 80 80 0 1 1 170 150" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="14" stroke-linecap="round"/>
+                    <!-- Redline Danger Zone Arc (6800 - 9000 RPM) -->
+                    <path d="M 148 58 A 80 80 0 0 1 170 150" fill="none" stroke="rgba(255,0,85,0.3)" stroke-width="14" stroke-linecap="round"/>
+                    <!-- Dynamic Live Fill Arc -->
+                    <path id="tachFillArc" d="M 30 150 A 80 80 0 1 1 170 150" fill="none" stroke="url(#tachGradient)" stroke-width="14" stroke-linecap="round" stroke-dasharray="377" stroke-dashoffset="377"/>
+                    
+                    <defs>
+                        <linearGradient id="tachGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" stop-color="#00f0ff"/>
+                            <stop offset="70%" stop-color="#00ff88"/>
+                            <stop offset="90%" stop-color="#ffaa00"/>
+                            <stop offset="100%" stop-color="#ff0055"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+
+                <div class="tach-center-readout">
+                    <div id="valRpm" class="tach-rpm-val">0</div>
+                    <div class="tach-rpm-unit">RPM</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CARD 2: SPEEDOMETER & TRANSMISSION GEAR -->
+        <section class="card">
+            <div class="card-title">
+                <span>Vehicle Speed & Gear</span>
+                <span id="valEngineRunning" style="color: var(--accent-green); font-size: 0.8rem; display:none;">● ENGINE ON</span>
+            </div>
+
+            <div class="speed-gear-container">
+                <div>
+                    <div id="valSpeed" class="speed-val">0</div>
+                    <div class="speed-unit" style="text-align: center;">KM/H</div>
+                </div>
+
+                <div class="gear-badge-box">
+                    <div id="valGear" class="gear-badge">P</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CARD 3: ENGINE TEMPERATURES (COOLANT & OIL) -->
+        <section class="card">
+            <div class="card-title">
+                <span>Thermal Metrics</span>
+                <span id="overheatAlert" style="color: var(--accent-crimson); font-size: 0.8rem; display:none;">⚠️ OVERHEAT</span>
+            </div>
+
+            <div class="temp-bars-grid">
+                <div class="temp-item">
+                    <div class="temp-header">
+                        <span>Coolant Temp</span>
+                        <span id="valWaterTemp" style="color: var(--accent-cyan); font-weight:700;">-- °C</span>
+                    </div>
+                    <div class="progress-track">
+                        <div id="fillWaterTemp" class="progress-fill"></div>
+                    </div>
+                </div>
+
+                <div class="temp-item">
+                    <div class="temp-header">
+                        <span>Engine Oil Temp</span>
+                        <span id="valOilTemp" style="color: var(--accent-green); font-weight:700;">-- °C</span>
+                    </div>
+                    <div class="progress-track">
+                        <div id="fillOilTemp" class="progress-fill"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TELEMETRY SECONDARY CARDS GRID -->
+        <div class="telemetry-cards-grid">
+            <div class="mini-card">
+                <div class="mini-card-label">12V Battery</div>
+                <div id="valBattery" class="mini-card-value">0.0 V</div>
+            </div>
+
+            <div class="mini-card">
+                <div class="mini-card-label">Fuel Level</div>
+                <div id="valFuel" class="mini-card-value">0 %</div>
+            </div>
+
+            <div class="mini-card">
+                <div class="mini-card-label">Throttle Position</div>
+                <div id="valThrottle" class="mini-card-value">0 %</div>
+            </div>
+
+            <div class="mini-card">
+                <div class="mini-card-label">Steering Angle</div>
+                <div id="valSteering" class="mini-card-value">0°</div>
+            </div>
+
+            <div class="mini-card">
+                <div class="mini-card-label">Brake Pressure</div>
+                <div id="valBrake" class="mini-card-value">0 Bar</div>
+            </div>
+
+            <div class="mini-card">
+                <div class="mini-card-label">Ambient Temp</div>
+                <div id="valAmbient" class="mini-card-value">-- °C</div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- BOTTOM TABBED PANEL: RAW CAN SNIFFER & LOGGING -->
+    <section class="bottom-panel">
+        <div class="tab-header">
+            <button id="tabSnifferBtn" class="tab-btn active">📡 Live Raw CAN Bus Sniffer</button>
+            <button id="tabToggleModeBtn" class="btn btn-primary" style="margin-left: auto; font-size: 0.8rem;">Switch Gateway Mode: PLOT / RAW</button>
+        </div>
+
+        <div class="table-wrapper">
+            <table class="sniffer-table">
+                <thead>
+                    <tr>
+                        <th>Timestamp (ms)</th>
+                        <th>CAN ID (Hex)</th>
+                        <th>DLC</th>
+                        <th>Raw Hex Data</th>
+                        <th>Frequency</th>
+                    </tr>
+                </thead>
+                <tbody id="snifferTableBody">
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: var(--text-dim); padding: 2rem;">
+                            Connect to Gateway to view live CAN frames...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <script src="app.js"></script>
+</body>
+</html>
