@@ -286,11 +286,30 @@ void loop() {
         // HONDA CIVIC 9TH GEN CAN DECODING ENGINE
         // -----------------------------------------------------------------
 
-        // A. 0x17C - Engine Speed RPM (100Hz)
+        // A. 0x17C - Engine Speed RPM & Brake Switch (100Hz)
         if (id == 0x17C && dlc >= 4) {
             uint16_t raw_rpm = ((uint16_t)rx_msg.data[2] << 8) | rx_msg.data[3];
             if (raw_rpm < 9000) {
                 current_telemetry.rpm = raw_rpm;
+            }
+            if (rx_msg.data[0] & 0x20) {
+                current_telemetry.flags |= 0x20; // Brake Switch Pressed
+            } else {
+                current_telemetry.flags &= ~0x20;
+            }
+        }
+
+        // H2. 0x1A0 - VSA / ABS & Traction Control Flags (50Hz)
+        if (id == 0x1A0 && dlc >= 2) {
+            if (rx_msg.data[1] & 0x08) {
+                current_telemetry.flags |= 0x08; // ABS Active
+            } else {
+                current_telemetry.flags &= ~0x08;
+            }
+            if (rx_msg.data[0] & 0x02) {
+                current_telemetry.flags |= 0x10; // TC Active
+            } else {
+                current_telemetry.flags &= ~0x10;
             }
         }
 
@@ -358,8 +377,8 @@ void loop() {
             }
         }
 
-        // Update Flags
-        current_telemetry.flags = 0;
+        // Update Flags (preserve Bit 3 ABS, Bit 4 TC, Bit 5 Brake Switch)
+        current_telemetry.flags &= 0x38; // Keep bits 3, 4, 5
         if (current_telemetry.rpm > 400) current_telemetry.flags |= 0x01; // Engine Running
         if (current_telemetry.rpm > 6800) current_telemetry.flags |= 0x02; // Shift Warning
         if (current_telemetry.water_temp_x10 > 1050) current_telemetry.flags |= 0x04; // Overheat
@@ -387,9 +406,9 @@ void loop() {
     if (current_mode == MODE_TELEMETRY && (now - last_plot_time >= 100)) {
         last_plot_time = now;
 
-        char json_buf[256];
+        char json_buf[300];
         snprintf(json_buf, sizeof(json_buf), 
-            "{\"type\":\"telemetry\",\"rpm\":%u,\"speed\":%.1f,\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,\"fuel\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"ambient\":%d,\"timestamp\":%lu}\n",
+            "{\"type\":\"telemetry\",\"rpm\":%u,\"speed\":%.1f,\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,\"fuel\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,\"tc\":%s,\"brake_sw\":%s,\"ambient\":%d,\"timestamp\":%lu}\n",
             current_telemetry.rpm,
             current_telemetry.speed_kmh_x10 / 10.0f,
             current_telemetry.water_temp_x10 / 10.0f,
@@ -400,6 +419,9 @@ void loop() {
             live_throttle_pct,
             current_telemetry.steering_deg,
             live_brake_bar,
+            (current_telemetry.flags & 0x08) ? "true" : "false",
+            (current_telemetry.flags & 0x10) ? "true" : "false",
+            (current_telemetry.flags & 0x20) ? "true" : "false",
             current_telemetry.ambient_temp,
             now
         );
