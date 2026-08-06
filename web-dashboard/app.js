@@ -411,26 +411,24 @@ function updateTelemetryUI(data) {
         valEngineRunning.style.display = 'none';
     }
 
-    // 2. Speedometer & Actual Gear Display
+    // 2. Speedometer & Direct CAN Gear Display
     valSpeed.textContent = (data.speed || 0).toFixed(0);
     const gearRaw = data.gear || 0;
-    let gearText = 'P';
-
-    if (gearRaw === 0 || gearRaw === 1) gearText = 'P';
-    else if (gearRaw === 2) gearText = 'R';
-    else if (gearRaw === 3) gearText = 'N';
-    else if (gearRaw === 4) gearText = 'D';
-    else if (gearRaw === 5) gearText = 'S';
-    else if (gearRaw & 0x10) {
-        const gNum = (gearRaw & 0x0F) - 5;
-        gearText = `S${gNum}`;
-    } else if (gearRaw >= 6 && gearRaw <= 11) {
-        const gNum = gearRaw - 5;
-        gearText = `D${gNum}`;
-    } else {
-        gearText = String(gearRaw);
-    }
-    valGear.textContent = gearText;
+    const DIRECT_GEAR_MAP = {
+        0: 'P',
+        1: 'P',
+        2: 'R',
+        3: 'N',
+        4: 'D',
+        5: 'S',
+        6: '1',
+        7: '2',
+        8: '3',
+        9: '4',
+        10: '5',
+        11: '6'
+    };
+    valGear.textContent = DIRECT_GEAR_MAP[gearRaw] || String(gearRaw);
 
     // 3. Coolant Temp (°C)
     const waterTemp = data.water_temp || 0;
