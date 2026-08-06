@@ -298,7 +298,32 @@ void loop() {
         if (id == 0x156 && dlc >= 5) {
             uint16_t spd_x10 = (uint16_t)((rx_msg.data[1] / 2.0f) * 10.0f);
             current_telemetry.speed_kmh_x10 = spd_x10;
-            current_telemetry.gear = rx_msg.data[4]; // 0=P, 1=R, 2=N, 3=D, 4=S, 5=1st, etc.
+            uint8_t raw_selector = rx_msg.data[4];
+
+            // If raw selector is explicit (0=P, 1=P, 2=R, 3=N, 6=1st, 7=2nd, 8=3rd, 9=4th, 10=5th, 11=6th)
+            if (raw_selector == 0 || raw_selector == 1 || raw_selector == 2 || raw_selector == 3 || raw_selector >= 6) {
+                current_telemetry.gear = raw_selector;
+            } 
+            // If in D (4) or S (5), compute actual mechanical gear ratio from RPM & Speed:
+            else if (raw_selector == 4 || raw_selector == 5) {
+                float spd_kmh = spd_x10 / 10.0f;
+                if (spd_kmh > 4.0f && current_telemetry.rpm > 500) {
+                    float ratio = (float)current_telemetry.rpm / spd_kmh;
+                    uint8_t calc_gear = 1;
+                    if (ratio > 115.0f) calc_gear = 1;
+                    else if (ratio > 75.0f) calc_gear = 2;
+                    else if (ratio > 52.0f) calc_gear = 3;
+                    else if (ratio > 38.0f) calc_gear = 4;
+                    else if (ratio > 28.0f) calc_gear = 5;
+                    else calc_gear = 6;
+
+                    // Store gear index (5 + calc_gear: 6=1st, 7=2nd, 8=3rd, 9=4th, 10=5th, 11=6th)
+                    // Add 16 to distinguish D vs S mode if needed (0x10 bit flag)
+                    current_telemetry.gear = (raw_selector == 5 ? 0x10 : 0x00) | (5 + calc_gear);
+                } else {
+                    current_telemetry.gear = raw_selector; // Keep D or S when stationary
+                }
+            }
         }
 
         // C. 0x1A4 - Throttle Position (50Hz)

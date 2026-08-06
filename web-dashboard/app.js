@@ -411,10 +411,26 @@ function updateTelemetryUI(data) {
         valEngineRunning.style.display = 'none';
     }
 
-    // 2. Speedometer & Gear
+    // 2. Speedometer & Actual Gear Display
     valSpeed.textContent = (data.speed || 0).toFixed(0);
-    const gearIdx = data.gear || 0;
-    valGear.textContent = GEAR_MAP[gearIdx] || 'P';
+    const gearRaw = data.gear || 0;
+    let gearText = 'P';
+
+    if (gearRaw === 0 || gearRaw === 1) gearText = 'P';
+    else if (gearRaw === 2) gearText = 'R';
+    else if (gearRaw === 3) gearText = 'N';
+    else if (gearRaw === 4) gearText = 'D';
+    else if (gearRaw === 5) gearText = 'S';
+    else if (gearRaw & 0x10) {
+        const gNum = (gearRaw & 0x0F) - 5;
+        gearText = `S${gNum}`;
+    } else if (gearRaw >= 6 && gearRaw <= 11) {
+        const gNum = gearRaw - 5;
+        gearText = `D${gNum}`;
+    } else {
+        gearText = String(gearRaw);
+    }
+    valGear.textContent = gearText;
 
     // 3. Coolant Temp (°C)
     const waterTemp = data.water_temp || 0;
