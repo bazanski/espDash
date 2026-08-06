@@ -37,7 +37,22 @@ typedef struct __attribute__((packed)) {
 
 ---
 
-## 3. Node Hardware & Hostnames
+## 4. Future Expansion & Sensor Roadmap
+
+### 📍 GY-BNO08X (BNO080 / BNO085) 9-DOF IMU Integration (Investigate Phase)
+* **Objective:** Connect a GY-BNO08X 9-axis Motion Sensor (I2C / SPI) to the Central ESP32-S3 Gateway.
+* **Capabilities:**
+  * **3-Axis Acceleration & G-Force Values:** Real-time lateral/longitudinal G-force monitoring for performance cornering and acceleration.
+  * **Vehicle Pitch & Roll Tilt Angle:** Track incline, slope, and body roll dynamics.
+  * **Parking Hit & Shock Detection:** Ultra-low-power accelerometer wake-up mode to detect parking bumps, impacts, or tampering while the vehicle is parked.
+  * **Telemetry Payload Integration:** Extend `TelemetryPacket` with `int16_t g_force_x_mg`, `int16_t g_force_y_mg`, `int16_t pitch_deg_x10`, `int16_t roll_deg_x10`.
+
+---
+
+## 5. Wireless Protocol Co-existence (ESP-NOW + BLE + Wi-Fi)
+
+* **ESP-NOW & BLE Simultaneous Operation:** ESP32-S3 features hardware Wi-Fi/Bluetooth Coexistence (`esp_coex`). ESP-NOW and BLE can operate concurrently.
+* **ESP-NOW Performance Optimization:** Disabling standard Wi-Fi router STA connection when in pure track mode eliminates Wi-Fi beacon listening overhead and reduces ESP-NOW packet latency to `< 0.5 ms`.
 
 > **Universal Gauge Design:** All display nodes run a universal, configurable telemetry display engine capable of rendering gauges, digital readouts, bar graphs, and warnings. Display nodes are currently general-purpose telemetry gauges; specific dedicated functions will be assigned in future iterations.
 

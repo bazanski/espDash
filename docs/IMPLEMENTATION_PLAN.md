@@ -100,3 +100,4 @@ The project is consolidated into a dedicated standalone workspace at `/Users/kic
 - [ ] **Phase 2 (Modern Web Telemetry Dashboard App):** Build the HTML5/JS Web Dashboard with WebSockets & WebSerial support.
 - [ ] **Phase 3 (Universal Display Gauges & ArduinoOTA):** Implement universal display node firmware for 3.16" LCD, Round JXL, AMOLED 1.32", ESP32-C6 LCD 1.47", and OLED shift light with ArduinoOTA enabled.
 - [ ] **Phase 4 (Heltec Meshtastic Home Assistant Relay):** Build Heltec ESP32-S3 bridge to send vehicle status over LoRa Mesh to Home Assistant.
+- [ ] **Phase 5 (GY-BNO08X 9-DOF IMU Gateway Expansion):** Integrate GY-BNO08X sensor on Central Gateway for G-force monitoring, vehicle tilt angles, and parking shock detection.
