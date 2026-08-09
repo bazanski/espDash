@@ -5,10 +5,14 @@
 // firmware never transmits a CAN frame. Do not change that.
 //
 // CONCURRENCY
-//   core 1  canRxTask  (prio 10) - twai_receive + decode + ring_push. No I/O.
-//   core 0  publishTask (prio 5) - ALL output: raw drain, JSON, ESP-NOW, and
-//                                  every WebSocket/telnet/Serial call.
-//   core 1  loopTask   (prio 1)  - ArduinoOTA + Wi-Fi maintenance only.
+//   core 1  canRxTask   (prio 10) - twai_receive + decode + ring_push. No I/O.
+//   core 1  publishTask (prio 5)  - ALL output: raw drain, JSON, ESP-NOW, and
+//                                   every WebSocket/telnet/Serial call.
+//   core 1  loopTask    (prio 1)  - ArduinoOTA + Wi-Fi maintenance only.
+//   core 0                        - left to the Wi-Fi/lwIP and TinyUSB tasks.
+//
+// Priority, not core affinity, is what protects CAN reception here: canRxTask
+// preempts publishTask, so a blocking write cannot delay a frame.
 //
 // Output used to happen inside the TWAI receive loop, so a TCP retransmit or
 // a slow USB host stalled CAN reception outright. At the measured 1399
@@ -117,13 +121,37 @@ static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint16_t espnow_seq = 0;
 static String last_connected_ip = "";
 
+static volatile uint32_t tx_truncated = 0;
+
+// USB CDC and TCP both accept short writes: write() returns how many bytes it
+// actually took, which is less than requested once the peer stops draining.
+// Ignoring that return value corrupts the stream - observed as JSON lines
+// missing whole 64-byte USB packets from the middle, because the tail of one
+// line and the head of the next were both discarded. Loop until the whole
+// buffer is gone.
+//
+// Blocking here is safe by design: canRxTask is independent, so a slow reader
+// backs up into the ring buffer, which drops oldest and counts it. The guard
+// bounds the wait so a peer that has stopped reading entirely cannot wedge
+// publishTask - we give up and count a truncation instead.
+static void write_all(Print &out, const uint8_t *buf, size_t len) {
+    size_t sent = 0;
+    int stalls = 0;
+    while (sent < len && stalls < 50) {
+        size_t n = out.write(buf + sent, len - sent);
+        if (n == 0) { stalls++; vTaskDelay(1); }
+        else { sent += n; stalls = 0; }
+    }
+    if (sent < len) tx_truncated++;
+}
+
 // All three transports get byte-identical payloads. MUST only be called from
 // publishTask (WebSockets library is not thread-safe).
 static void broadcast_line(const char *str) {
     size_t len = strlen(str);
-    Serial.write((const uint8_t *)str, len);
+    write_all(Serial, (const uint8_t *)str, len);
     if (telnetClient && telnetClient.connected()) {
-        telnetClient.write((const uint8_t *)str, len);
+        write_all(telnetClient, (const uint8_t *)str, len);
     }
     webSocket.broadcastTXT((uint8_t *)str, len);
 }
@@ -221,11 +249,12 @@ static void process_cmd_string(String cmd) {
     } else if (cmd == "STATS") {
         char buf[160];
         snprintf(buf, sizeof(buf),
-                 "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu\n",
+                 "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu tx_trunc:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
-                 (unsigned long)twai_queue_full_events);
+                 (unsigned long)twai_queue_full_events,
+                 (unsigned long)tx_truncated);
         broadcast_line(buf);
     }
 }
@@ -557,13 +586,19 @@ void setup() {
 
     init_esp_now();
 
-    // canRxTask on core 1 at high priority: it preempts loopTask so decoding
-    // is never delayed by OTA or Wi-Fi bookkeeping. publishTask on core 0
-    // sits alongside the Wi-Fi/lwIP stack that its socket writes feed.
+    // Both application tasks live on core 1; core 0 is left to the Wi-Fi/lwIP
+    // stack AND the TinyUSB device task, which is what actually drains the USB
+    // CDC FIFO. Running publishTask on core 0 starves that task and silently
+    // drops CDC bytes - measured as ~10% byte loss shredding 58% of telemetry
+    // lines into fragments, against 0 fragments with both tasks on core 1.
+    //
+    // Nothing is lost by this placement: canRxTask at priority 10 preempts
+    // publishTask at 5, so a blocking write still cannot delay CAN reception,
+    // which is the entire point of the split.
     xTaskCreatePinnedToCore(canRxTask,   "canRx",   4096, NULL, 10, NULL, 1);
-    xTaskCreatePinnedToCore(publishTask, "publish", 8192, NULL, 5,  NULL, 0);
+    xTaskCreatePinnedToCore(publishTask, "publish", 8192, NULL, 5,  NULL, 1);
 
-    Serial.println("[SYSTEM] Gateway ready. canRxTask@core1 prio10, publishTask@core0 prio5.");
+    Serial.println("[SYSTEM] Gateway ready. canRxTask@core1 prio10, publishTask@core1 prio5.");
 }
 
 // =========================================================================
