@@ -10,27 +10,35 @@
 #include <SPI.h>
 
 // =========================================================================
-// 34-BYTE TELEMETRY PACKET PAYLOAD FOR ESP-NOW MULTICAST BROADCAST
+// ESP-NOW TELEMETRY - shared wire protocol
 // =========================================================================
-typedef struct __attribute__((packed)) {
-    uint16_t rpm;           // 0 - 9000 RPM (1 RPM resolution)
-    uint16_t speed_kmh_x10; // 0 - 300.0 km/h (0.1 km/h resolution)
-    int16_t  water_temp_x10;// -40.0 to +150.0 °C (0.1 °C resolution)
-    int16_t  oil_temp_x10;  // -40.0 to +150.0 °C (0.1 °C resolution)
-    uint16_t battery_mv;    // 0 - 20,000 mV (e.g., 13800 = 13.8V)
-    uint8_t  gear;          // 0=P, 1=R, 2=N, 3=D, 4=S, 5=1st, 6=2nd, etc.
-    uint8_t  fuel_pct;      // 0 - 100 %
-    int16_t  steering_deg;  // -720 to +720 degrees
-    int8_t   ambient_temp;  // -40 to +80 °C
-    uint8_t  flags;         // Bit 0: Engine Running, Bit 1: Shift Warning, Bit 2: Overheat
-    uint8_t  throttle_pct;  // 0 - 100 % throttle pedal position
-    uint8_t  brake_bar;     // 0 - 255 bar brake fluid pressure
-    uint32_t timestamp_ms;  // Gateway Uptime in ms
-} TelemetryPacket;
+// The packet layout lives in firmware/shared/EspDashProto. Do NOT paste a
+// copy of the struct in here: that is exactly how the gateway and this node
+// drifted apart before.
+#include <EspDashProto.h>
 
-static TelemetryPacket current_pkt = {0};
-static uint32_t last_pkt_rx_time = 0;
-static bool esp_now_connected = false;
+static EspDashTelemetry current_pkt = {0};
+static uint16_t  current_payload_len = 0;   // what the sender actually sent
+static uint32_t  last_pkt_rx_time = 0;
+static uint16_t  last_seq = 0;
+static uint32_t  pkt_gaps = 0;              // missed sequence numbers
+static bool      ever_linked = false;
+
+// ---- ESP-NOW channel discovery -----------------------------------------
+// The gateway transmits on whatever channel its Wi-Fi AP uses. A node pinned
+// to channel 1 simply never hears a gateway on channel 6 - a silent, total
+// failure that gets more likely with every gauge added. So sweep the channels
+// until a valid packet arrives, then lock on.
+static uint8_t  espnow_channel = 1;
+static bool     channel_locked = false;
+static uint32_t last_channel_hop = 0;
+#define CHANNEL_HOP_MS   200    // dwell per channel while searching
+#define LINK_TIMEOUT_MS  1500   // no valid packet => link considered lost
+
+// LINK_LOST is deliberately distinct from LINK_SEARCHING: a gauge that had a
+// gateway and lost it is a fault worth showing, whereas one that has never
+// seen a gateway is just still looking.
+enum LinkState { LINK_LIVE, LINK_SEARCHING, LINK_LOST };
 
 // =========================================================================
 // DISPLAY & DOUBLE BUFFER SPRITE
@@ -103,17 +111,37 @@ void setup_web_ota() {
 // ESP-NOW RECEIVE CALLBACK
 // =========================================================================
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-    if (len == sizeof(TelemetryPacket)) {
-        memcpy(&current_pkt, incomingData, sizeof(TelemetryPacket));
-        last_pkt_rx_time = millis();
-        esp_now_connected = true;
+    uint16_t plen = 0, seq = 0;
+    const EspDashTelemetry *t = espdash_parse(incomingData, len, &plen, &seq);
+    if (!t) return;   // not ours, or an incompatible major version
+
+    // Copy only what the sender actually provided, leaving any newer trailing
+    // fields we do not know about at zero. This is what lets an old node keep
+    // working against a newer gateway.
+    uint16_t copy = plen < sizeof(EspDashTelemetry) ? plen : sizeof(EspDashTelemetry);
+    memset(&current_pkt, 0, sizeof(current_pkt));
+    memcpy(&current_pkt, t, copy);
+    current_payload_len = plen;
+
+    if (ever_linked) {
+        uint16_t expected = (uint16_t)(last_seq + 1);
+        if (seq != expected) pkt_gaps++;
+    }
+    last_seq = seq;
+    last_pkt_rx_time = millis();
+    ever_linked = true;
+
+    if (!channel_locked) {
+        channel_locked = true;
+        Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n",
+                      espnow_channel, plen);
     }
 }
 
 // =========================================================================
 // DRAW GAUGES ON 240x240 CIRCULAR DISPLAY SPRITE
 // =========================================================================
-void render_gauge_ui(const TelemetryPacket &pkt, bool is_demo) {
+void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.fillSprite(COLOR_BG);
 
     const int cx = 120;
@@ -168,7 +196,7 @@ void render_gauge_ui(const TelemetryPacket &pkt, bool is_demo) {
     }
 
     // 4. Brake Pressure Arc (240° to 300°, 60° sweep, 180° rotated)
-    float brRatio = min(1.0f, (float)pkt.brake_bar / 150.0f);
+    float brRatio = min(1.0f, (float)pkt.brake_pct / 100.0f);
     uint32_t brStartDeg = 300 - (uint32_t)(brRatio * 60.0f);
 
     spr.drawSmoothArc(cx, cy, 82, 76, 240, 300, COLOR_DARK_GRAY, COLOR_BG, false);
@@ -183,7 +211,7 @@ void render_gauge_ui(const TelemetryPacket &pkt, bool is_demo) {
 
     spr.setTextColor(COLOR_BLUE, COLOR_BG);
     spr.setTextDatum(MR_DATUM);
-    spr.drawString(String(pkt.brake_bar) + "B", cx + 70, cy);
+    spr.drawString(String(pkt.brake_pct) + "%", cx + 70, cy);
 
     // 5. Steering Angle Dial (Top Part of Screen at 270°)
     float stAngleRad = (pkt.steering_deg / 540.0f) * (PI * 0.4f);
@@ -240,10 +268,27 @@ void render_gauge_ui(const TelemetryPacket &pkt, bool is_demo) {
     spr.setTextColor(COLOR_WHITE, COLOR_BG);
     spr.drawString(gearStr, cx + 48, cy + 62);
 
-    // 9. Top Status Badge (DEMO SWEEP / ESP-NOW status)
-    spr.setTextColor(is_demo ? COLOR_YELLOW : COLOR_CYAN, COLOR_BG);
+    // 9. Top Status Badge - link state, never a silent fake
+    const char *badge;
+    uint16_t badge_col;
+    switch (link) {
+        case LINK_LIVE:
+            badge = "ESP-NOW 20Hz";  badge_col = COLOR_CYAN;   break;
+        case LINK_LOST:
+            badge = "NO LINK";       badge_col = COLOR_RED;    break;
+        default:
+            badge = "SEARCHING...";  badge_col = COLOR_YELLOW; break;
+    }
+    spr.setTextColor(badge_col, COLOR_BG);
     spr.setTextDatum(TC_DATUM);
-    spr.drawString(is_demo ? "DEMO SWEEP" : "ESP-NOW 20Hz", cx, 16);
+    spr.drawString(badge, cx, 16);
+
+    // While searching, show which channel is being probed so a mismatch is
+    // diagnosable from the gauge itself.
+    if (link == LINK_SEARCHING && !channel_locked) {
+        spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
+        spr.drawString("ch " + String(espnow_channel), cx, 30);
+    }
 
     // Push Sprite to Screen
     spr.pushSprite(0, 0);
@@ -347,10 +392,31 @@ void loop() {
         WiFi.setAutoReconnect(true);
     }
 
-    // Determine if receiving live telemetry or running fallback Demo Mode
-    bool is_demo = (now - last_pkt_rx_time > 3000);
+    // ---- ESP-NOW link supervision & channel discovery -------------------
+    bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
 
-    TelemetryPacket active_pkt;
+    // Only sweep when standalone: with Wi-Fi up the radio is already parked on
+    // the AP's channel and moving it would drop the connection and OTA.
+    if (!live && WiFi.status() != WL_CONNECTED) {
+        if (channel_locked) {
+            // We had a link and lost it - the gateway may have moved networks.
+            channel_locked = false;
+            Serial.println("[ESP-NOW] Link lost, resuming channel scan");
+        }
+        if (now - last_channel_hop >= CHANNEL_HOP_MS) {
+            last_channel_hop = now;
+            espnow_channel = (espnow_channel % 13) + 1;
+            esp_wifi_set_channel(espnow_channel, WIFI_SECOND_CHAN_NONE);
+        }
+    }
+
+    LinkState link = live ? LINK_LIVE : (ever_linked ? LINK_LOST : LINK_SEARCHING);
+
+    // Fall back to the bench sweep only when no gateway has ever been seen, so
+    // a real dropout is never disguised as live data.
+    bool is_demo = (link == LINK_SEARCHING);
+
+    EspDashTelemetry active_pkt = {0};   // fields the demo does not set read 0
     if (is_demo) {
         float phase = now * 0.002f;
         active_pkt.rpm = 3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500;
@@ -358,12 +424,12 @@ void loop() {
         active_pkt.water_temp_x10 = (int16_t)((92 + sin(phase * 0.2f) * 6) * 10);
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
-        active_pkt.brake_bar = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
+        active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
         active_pkt.gear = 4; // D
     } else {
         active_pkt = current_pkt;
     }
 
-    render_gauge_ui(active_pkt, is_demo);
+    render_gauge_ui(active_pkt, link);
     delay(20); // ~50 FPS target
 }
