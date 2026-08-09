@@ -21,7 +21,8 @@ static EspDashTelemetry current_pkt = {0};
 static uint16_t  current_payload_len = 0;   // what the sender actually sent
 static uint32_t  last_pkt_rx_time = 0;
 static uint16_t  last_seq = 0;
-static uint32_t  pkt_gaps = 0;              // missed sequence numbers
+static volatile uint32_t pkt_gaps = 0;      // missed sequence numbers
+static volatile uint32_t pkt_count = 0;     // valid packets since boot
 static bool      ever_linked = false;
 
 // ---- ESP-NOW channel discovery -----------------------------------------
@@ -39,6 +40,16 @@ static uint32_t last_channel_hop = 0;
 // gateway and lost it is a fault worth showing, whereas one that has never
 // seen a gateway is just still looking.
 enum LinkState { LINK_LIVE, LINK_SEARCHING, LINK_LOST };
+
+// The channel the radio is actually on, which is not necessarily
+// espnow_channel: when Wi-Fi is associated it owns the channel and the scan
+// never runs, so the scan variable would misreport it.
+static uint8_t actual_channel() {
+    uint8_t ch = 0;
+    wifi_second_chan_t sec;
+    if (esp_wifi_get_channel(&ch, &sec) != ESP_OK) return espnow_channel;
+    return ch;
+}
 
 // =========================================================================
 // DISPLAY & DOUBLE BUFFER SPRITE
@@ -124,15 +135,19 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     current_payload_len = plen;
 
     if (ever_linked) {
-        uint16_t expected = (uint16_t)(last_seq + 1);
-        if (seq != expected) pkt_gaps++;
+        // Count how many packets were actually missed, not just how many times
+        // a discontinuity occurred - the difference matters when diagnosing.
+        uint16_t missed = (uint16_t)(seq - last_seq - 1);
+        if (missed && missed < 1000) pkt_gaps += missed;
     }
     last_seq = seq;
     last_pkt_rx_time = millis();
     ever_linked = true;
+    pkt_count++;
 
     if (!channel_locked) {
         channel_locked = true;
+        espnow_channel = actual_channel();
         Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n",
                       espnow_channel, plen);
     }
@@ -370,6 +385,12 @@ void setup() {
     spr.createSprite(240, 240);
 
     // ESP-NOW Setup
+    // Wi-Fi STA defaults to modem sleep, waking only on DTIM beacons - so an
+    // associated node sleeps through most ESP-NOW broadcasts. Measured on the
+    // bench: 3.4-8.8 Hz received against the gateway's 20 Hz. Disabling power
+    // save is what makes the link actually deliver 20 Hz.
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     if (esp_now_init() == ESP_OK) {
         esp_now_register_recv_cb(OnDataRecv);
     }
@@ -428,6 +449,24 @@ void loop() {
         active_pkt.gear = 4; // D
     } else {
         active_pkt = current_pkt;
+    }
+
+    // Periodic link health, so "it looks connected" can be checked rather than
+    // eyeballed: packet rate should sit at the gateway's 20 Hz and gaps at 0.
+    static uint32_t last_link_log = 0, last_pkt_count = 0;
+    if (now - last_link_log >= 2000) {
+        uint32_t n = pkt_count;
+        float hz = (n - last_pkt_count) * 1000.0f / (now - last_link_log);
+        last_link_log = now;
+        last_pkt_count = n;
+        const char *st = (link == LINK_LIVE) ? "LIVE"
+                       : (link == LINK_LOST) ? "LOST" : "SEARCHING";
+        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu gaps:%lu payload:%u "
+                      "rpm:%u spd:%.1f gear:%u thr:%u\n",
+                      st, actual_channel(), hz, (unsigned long)n,
+                      (unsigned long)pkt_gaps, current_payload_len,
+                      current_pkt.rpm, current_pkt.speed_kmh_x10 / 10.0f,
+                      current_pkt.gear, current_pkt.throttle_pct);
     }
 
     render_gauge_ui(active_pkt, link);
