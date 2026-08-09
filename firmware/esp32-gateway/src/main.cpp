@@ -584,6 +584,11 @@ void setup() {
         esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     }
 
+    // Wi-Fi STA modem sleep makes the radio doze between DTIM beacons, which
+    // costs ESP-NOW packets on both ends of the link. The gateway is mains/
+    // vehicle powered, so trade the power for a dependable 20 Hz.
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     init_esp_now();
 
     // Both application tasks live on core 1; core 0 is left to the Wi-Fi/lwIP
