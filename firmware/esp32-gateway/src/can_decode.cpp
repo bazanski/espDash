@@ -146,14 +146,18 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
         } else hit = false;
         break;
 
-    // 0x156 STEERING_SENSORS - angle is a signed 16-bit scaled by -0.1.
-    // The old /9.0 gave +-536 deg and the wrong sign; -0.1 gives -493..+514
-    // on the Si trace, matching the sensor's specified +-500 range.
+    // 0x156 STEERING_SENSORS - angle is a signed 16-bit, magnitude scaled by
+    // 0.1. The old /9.0 gave +-536 deg, beyond the sensor's +-500 spec; /10
+    // fixed the magnitude (confirmed on the 2015 Si trace: -493..+514 deg).
+    // The SIGN was set from opendbc's documented factor (-0.1) but that was
+    // only ever checked by magnitude, never against a real left/right turn.
+    // On-car test on this chassis (2026-08-09) showed it inverted, so the
+    // negation opendbc uses does not carry over here - dropped.
     case 0x156:
         if (dlc >= 4) {
             int16_t raw = (int16_t)be16(d, 0);
-            st->steering_deg = (int16_t)(-raw / 10);
-            st->steering_rate_dps = (int16_t)(-(int16_t)be16(d, 2));
+            st->steering_deg = (int16_t)(raw / 10);
+            st->steering_rate_dps = (int16_t)be16(d, 2);
             touch(st, SIG_STEER, now_ms);
         } else hit = false;
         break;
@@ -201,15 +205,20 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
         break;
 
     // 0x188 - automatic gearbox selector. Absent from the 2015 Si (manual),
-    // so this mapping rests on this car's own shifter-movement capture.
+    // so this mapping rests entirely on this car's own data - originally the
+    // shifter-movement capture, corrected by an on-car road test (2026-08-09)
+    // that showed every position off by one against the physical selector.
+    // The corrected byte values are a clean single-bit progression for
+    // P/R/N/D, with S falling through as zero - a much more plausible
+    // encoding than the scattered one it replaces.
     case 0x188:
         if (dlc >= 4) {
             switch (d[3]) {
-                case 0x04: st->gear = 0; break;  // P
-                case 0x01: st->gear = 1; break;  // R
-                case 0x08: st->gear = 2; break;  // N
-                case 0x00: st->gear = 3; break;  // D
-                case 0x02: st->gear = 4; break;  // S
+                case 0x01: st->gear = 0; break;  // P
+                case 0x02: st->gear = 1; break;  // R
+                case 0x04: st->gear = 2; break;  // N
+                case 0x08: st->gear = 3; break;  // D
+                case 0x00: st->gear = 4; break;  // S
                 default: hit = false; break;
             }
             if (hit) touch(st, SIG_GEAR, now_ms);

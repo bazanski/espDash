@@ -318,23 +318,27 @@ static void test_brake_is_16_bit(void) {
 }
 
 static void test_steering_sign_and_scale(void) {
+    // Sign confirmed by an on-car test (2026-08-09): raw positive is a
+    // rightward turn. opendbc's documented -0.1 factor does NOT carry over to
+    // this chassis and was only ever checked here by magnitude, not direction
+    // - a reminder that a reference trace proves magnitude, not sign.
     CanDecodeState st;
     can_decode_init(&st);
     CanFrame f;
     memset(&f, 0, sizeof(f));
     f.id = 0x156; f.dlc = 6;
 
-    // raw +1000 -> -100.0 deg (factor is negative)
+    // raw +1000 -> +100.0 deg
     f.data[0] = 0x03; f.data[1] = 0xE8;
     f.data[5] = honda_checksum(0x156, f.data, 6);
     TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 10));
-    TEST_ASSERT_EQUAL_INT16(-100, st.steering_deg);
+    TEST_ASSERT_EQUAL_INT16(100, st.steering_deg);
 
-    // raw -1000 -> +100.0 deg
+    // raw -1000 -> -100.0 deg
     f.data[0] = 0xFC; f.data[1] = 0x18;
     f.data[5] = honda_checksum(0x156, f.data, 6);
     TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 20));
-    TEST_ASSERT_EQUAL_INT16(100, st.steering_deg);
+    TEST_ASSERT_EQUAL_INT16(-100, st.steering_deg);
 }
 
 static void test_0x372_cannot_set_ambient(void) {
@@ -390,6 +394,29 @@ static void test_staleness(void) {
     TEST_ASSERT_TRUE(can_decode_is_stale(&st, SIG_FUEL, 1000, 2000));
 }
 
+// Corrected by an on-car road test (2026-08-09): every position was off by
+// one against the physical selector. This is the only signal with no
+// external reference at all - the 2015 Si trace is a manual gearbox and
+// never carries 0x188 - so a driving car is the only oracle for it.
+static void test_gear_mapping(void) {
+    CanDecodeState st;
+    can_decode_init(&st);
+    CanFrame f;
+    memset(&f, 0, sizeof(f));
+    f.id = 0x188; f.dlc = 6;
+
+    struct { uint8_t raw; uint8_t expect; const char *label; } cases[] = {
+        {0x01, 0, "P"}, {0x02, 1, "R"}, {0x04, 2, "N"}, {0x08, 3, "D"}, {0x00, 4, "S"},
+    };
+    for (auto &c : cases) {
+        memset(f.data, 0, 8);
+        f.data[3] = c.raw;
+        f.data[5] = honda_checksum(0x188, f.data, 6);
+        TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 10));
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(c.expect, st.gear, c.label);
+    }
+}
+
 static void test_flags(void) {
     CanDecodeState st;
     can_decode_init(&st);
@@ -424,6 +451,7 @@ int main(void) {
     RUN_TEST(test_0x372_cannot_set_ambient);
     RUN_TEST(test_0x1A0_is_not_decoded);
     RUN_TEST(test_staleness);
+    RUN_TEST(test_gear_mapping);
     RUN_TEST(test_flags);
     return UNITY_END();
 }
