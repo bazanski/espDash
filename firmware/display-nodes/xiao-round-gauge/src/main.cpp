@@ -211,12 +211,22 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     }
 
     // 4. Brake Pressure Arc (240° to 300°, 60° sweep, 180° rotated)
+    // The brake switch (a distinct binary signal from the pressure below) is
+    // shown by lighting the whole gauge - arc and readout - in alert red
+    // instead of drawing a new indicator, since this display has no verified
+    // free space for one and a wrongly-placed element is worse than none.
+    bool brakeEngaged = (pkt.flags & ESPDASH_FLAG_BRAKE_SWITCH) != 0;
+    uint16_t brakeColor = brakeEngaged ? COLOR_RED : COLOR_BLUE;
+
     float brRatio = min(1.0f, (float)pkt.brake_pct / 100.0f);
     uint32_t brStartDeg = 300 - (uint32_t)(brRatio * 60.0f);
 
     spr.drawSmoothArc(cx, cy, 82, 76, 240, 300, COLOR_DARK_GRAY, COLOR_BG, false);
-    if (brRatio > 0.01f) {
-        spr.drawSmoothArc(cx, cy, 82, 76, brStartDeg, 300, COLOR_BLUE, COLOR_BG, true);
+    if (brRatio > 0.01f || brakeEngaged) {
+        // Engaged-but-near-zero-pressure still needs to show something, so
+        // floor the arc to a small visible sliver rather than drawing nothing.
+        uint32_t litStartDeg = brakeEngaged ? min((uint32_t)295, brStartDeg) : brStartDeg;
+        spr.drawSmoothArc(cx, cy, 82, 76, litStartDeg, 300, brakeColor, COLOR_BG, true);
     }
 
     // Readout labels on sides (positioned right up against inside of throttle/brake slider arcs)
@@ -224,7 +234,7 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextDatum(ML_DATUM);
     spr.drawString(String(pkt.throttle_pct) + "%", cx - 70, cy);
 
-    spr.setTextColor(COLOR_BLUE, COLOR_BG);
+    spr.setTextColor(brakeColor, COLOR_BG);
     spr.setTextDatum(MR_DATUM);
     spr.drawString(String(pkt.brake_pct) + "%", cx + 70, cy);
 
@@ -298,11 +308,17 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextDatum(TC_DATUM);
     spr.drawString(badge, cx, 16);
 
-    // While searching, show which channel is being probed so a mismatch is
-    // diagnosable from the gauge itself.
+    // Second status line is shared: while searching, show which channel is
+    // being probed so a mismatch is diagnosable; otherwise show battery
+    // voltage there instead, since a real packet means real data.
     if (link == LINK_SEARCHING && !channel_locked) {
         spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
         spr.drawString("ch " + String(espnow_channel), cx, 30);
+    } else if (link != LINK_SEARCHING) {
+        float battV = pkt.battery_mv / 1000.0f;
+        bool lowBatt = battV > 0.0f && battV < 12.0f;
+        spr.setTextColor(lowBatt ? COLOR_RED : COLOR_TEXT_MUT, COLOR_BG);
+        spr.drawString(String(battV, 1) + "V", cx, 30);
     }
 
     // Push Sprite to Screen
