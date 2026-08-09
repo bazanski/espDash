@@ -336,6 +336,7 @@ async function connectWebSerial() {
         await serialPort.open({ baudRate: 115200 });
 
         setConnectedState(true);
+        await sendCommand('MODE:DUAL');
 
         const textDecoder = new TextDecoderStream();
         const readableStreamClosed = serialPort.readable.pipeTo(textDecoder.writable);
@@ -412,24 +413,63 @@ function resetUI() {
     valAmbient.textContent = '-- °C';
 }
 
-function sendCommand(cmd) {
+async function sendCommand(cmd) {
+    const dataStr = cmd + '\n';
     if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(cmd + '\n');
+        socket.send(dataStr);
+    }
+    if (serialPort && serialPort.writable) {
+        try {
+            const encoder = new TextEncoder();
+            const writer = serialPort.writable.getWriter();
+            await writer.write(encoder.encode(dataStr));
+            writer.releaseLock();
+        } catch (e) {
+            console.error('[WebSerial Send Error]', e);
+        }
     }
 }
 
-// Gateway Mode Toggle Button (PLOT / RAW)
-tabToggleModeBtn.addEventListener('click', () => {
+// Gateway Mode Toggle Button (PLOT / RAW / DUAL)
+tabToggleModeBtn.addEventListener('click', async () => {
     if (gatewayMode === 'PLOT') {
         gatewayMode = 'RAW';
-        sendCommand('MODE:RAW');
-        tabToggleModeBtn.textContent = 'Gateway Mode: RAW SNIFFER (Click for TELEMETRY)';
+        await sendCommand('MODE:RAW');
+        tabToggleModeBtn.textContent = 'Gateway Mode: RAW SNIFFER (Click for DUAL)';
+    } else if (gatewayMode === 'RAW') {
+        gatewayMode = 'DUAL';
+        await sendCommand('MODE:DUAL');
+        tabToggleModeBtn.textContent = 'Gateway Mode: DUAL (RAW + TELEMETRY) (Click for TELEMETRY)';
     } else {
         gatewayMode = 'PLOT';
-        sendCommand('MODE:PLOT');
+        await sendCommand('MODE:PLOT');
         tabToggleModeBtn.textContent = 'Gateway Mode: TELEMETRY (Click for RAW)';
     }
 });
+
+// Hardware Demo Mode Toggle Button
+let isHardwareDemoActive = false;
+const btnToggleDemo = document.getElementById('btnToggleDemo');
+
+if (btnToggleDemo) {
+    btnToggleDemo.addEventListener('click', async () => {
+        if (!isHardwareDemoActive) {
+            isHardwareDemoActive = true;
+            await sendCommand('DEMO:ON');
+            btnToggleDemo.textContent = '🎮 Hardware Demo: ON';
+            btnToggleDemo.style.background = 'rgba(0, 240, 255, 0.25)';
+            btnToggleDemo.style.color = '#00f0ff';
+            btnToggleDemo.style.borderColor = '#00f0ff';
+        } else {
+            isHardwareDemoActive = false;
+            await sendCommand('DEMO:OFF');
+            btnToggleDemo.textContent = '🎮 Hardware Demo: OFF';
+            btnToggleDemo.style.background = 'rgba(255, 170, 0, 0.15)';
+            btnToggleDemo.style.color = '#ffaa00';
+            btnToggleDemo.style.borderColor = '#ffaa00';
+        }
+    });
+}
 
 // =========================================================================
 // DATA PARSER ENGINE
@@ -437,6 +477,24 @@ tabToggleModeBtn.addEventListener('click', () => {
 function parseIncomingLine(line) {
     line = line.trim();
     if (!line) return;
+
+    if (line.includes('[DEMO] Demo Telemetry Generator ENABLED')) {
+        isHardwareDemoActive = true;
+        if (btnToggleDemo) {
+            btnToggleDemo.textContent = '🎮 Hardware Demo: ON';
+            btnToggleDemo.style.background = 'rgba(0, 240, 255, 0.25)';
+            btnToggleDemo.style.color = '#00f0ff';
+            btnToggleDemo.style.borderColor = '#00f0ff';
+        }
+    } else if (line.includes('[DEMO] Demo Telemetry Generator DISABLED')) {
+        isHardwareDemoActive = false;
+        if (btnToggleDemo) {
+            btnToggleDemo.textContent = '🎮 Hardware Demo: OFF';
+            btnToggleDemo.style.background = 'rgba(255, 170, 0, 0.15)';
+            btnToggleDemo.style.color = '#ffaa00';
+            btnToggleDemo.style.borderColor = '#ffaa00';
+        }
+    }
 
     if (line.startsWith('{') && line.endsWith('}')) {
         try {
@@ -488,17 +546,16 @@ function updateTelemetryUI(data) {
     const gearRaw = data.gear || 0;
     const DIRECT_GEAR_MAP = {
         0: 'P',
-        1: 'P',
-        2: 'R',
-        3: 'N',
-        4: 'D',
-        5: 'S',
-        6: '1',
-        7: '2',
-        8: '3',
-        9: '4',
-        10: '5',
-        11: '6'
+        1: 'R',
+        2: 'N',
+        3: 'D',
+        4: 'S',
+        5: '1',
+        6: '2',
+        7: '3',
+        8: '4',
+        9: '5',
+        10: '6'
     };
     valGear.textContent = DIRECT_GEAR_MAP[gearRaw] || String(gearRaw);
 

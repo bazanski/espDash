@@ -1,0 +1,369 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <ESPmDNS.h>
+#include <esp_wifi.h>
+#include <esp_now.h>
+#include <ArduinoOTA.h>
+#include <WebServer.h>
+#include <TFT_eSPI.h>
+#include <SPI.h>
+
+// =========================================================================
+// 34-BYTE TELEMETRY PACKET PAYLOAD FOR ESP-NOW MULTICAST BROADCAST
+// =========================================================================
+typedef struct __attribute__((packed)) {
+    uint16_t rpm;           // 0 - 9000 RPM (1 RPM resolution)
+    uint16_t speed_kmh_x10; // 0 - 300.0 km/h (0.1 km/h resolution)
+    int16_t  water_temp_x10;// -40.0 to +150.0 °C (0.1 °C resolution)
+    int16_t  oil_temp_x10;  // -40.0 to +150.0 °C (0.1 °C resolution)
+    uint16_t battery_mv;    // 0 - 20,000 mV (e.g., 13800 = 13.8V)
+    uint8_t  gear;          // 0=P, 1=R, 2=N, 3=D, 4=S, 5=1st, 6=2nd, etc.
+    uint8_t  fuel_pct;      // 0 - 100 %
+    int16_t  steering_deg;  // -720 to +720 degrees
+    int8_t   ambient_temp;  // -40 to +80 °C
+    uint8_t  flags;         // Bit 0: Engine Running, Bit 1: Shift Warning, Bit 2: Overheat
+    uint8_t  throttle_pct;  // 0 - 100 % throttle pedal position
+    uint8_t  brake_bar;     // 0 - 255 bar brake fluid pressure
+    uint32_t timestamp_ms;  // Gateway Uptime in ms
+} TelemetryPacket;
+
+static TelemetryPacket current_pkt = {0};
+static uint32_t last_pkt_rx_time = 0;
+static bool esp_now_connected = false;
+
+// =========================================================================
+// DISPLAY & DOUBLE BUFFER SPRITE
+// =========================================================================
+static TFT_eSPI tft = TFT_eSPI();
+static TFT_eSprite spr = TFT_eSprite(&tft);
+
+// Color definitions (16-bit 565 RGB)
+#define COLOR_BG        0x0863 // Very dark blue (#0b0f19)
+#define COLOR_CARD      0x10E5 // Dark card bg
+#define COLOR_CYAN      0x07FF // Bright neon cyan
+#define COLOR_GREEN     0x07E0 // Bright green
+#define COLOR_YELLOW    0xFFE0 // Bright yellow
+#define COLOR_RED       0xF800 // Bright red
+#define COLOR_BLUE      0x041F // Bright blue
+#define COLOR_WHITE     0xFFFF // Pure white
+#define COLOR_TEXT_MUT  0x8C71 // Muted grey
+#define COLOR_DARK_GRAY 0x18E3 // Track bg gray
+
+// =========================================================================
+// MULTI-WIFI & WEB OTA SERVER
+// =========================================================================
+static WiFiMulti wifiMulti;
+static WebServer webServer(80);
+static uint32_t last_wifi_check = 0;
+
+// Simple WebOTA Status & Update HTML Page
+const char* ota_index_html = 
+"<!DOCTYPE html><html><head><title>xiao-round-gauge.local WebOTA</title>"
+"<style>body{background:#0b0f19;color:#fff;font-family:sans-serif;text-align:center;padding:50px;}"
+"h1{color:#00f0ff;} .card{background:#141b2d;padding:30px;border-radius:12px;display:inline-block;border:1px solid #222e48;}"
+"input[type=file]{margin:20px 0;} input[type=submit]{background:#00f0ff;color:#000;border:none;padding:10px 20px;font-weight:bold;border-radius:6px;cursor:pointer;}</style></head>"
+"<body><div class='card'><h1>🏎️ esp32-gauge-round.local</h1>"
+"<p>XIAO Round Universal Gauge Wireless Firmware Update</p>"
+"<form method='POST' action='/update' enctype='multipart/form-data'>"
+"<input type='file' name='update'><br><input type='submit' value='Upload & Flash Firmware'>"
+"</form></div></body></html>";
+
+void setup_web_ota() {
+    webServer.on("/", HTTP_GET, []() {
+        webServer.send(200, "text/html", ota_index_html);
+    });
+    webServer.on("/update", HTTP_POST, []() {
+        webServer.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK - Rebooting...");
+        delay(500);
+        ESP.restart();
+    }, []() {
+        HTTPUpload& upload = webServer.upload();
+        if (upload.status == UPLOAD_FILE_START) {
+            Serial.printf("Update: %s\n", upload.filename.c_str());
+            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                Update.printError(Serial);
+            }
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+            if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+                Update.printError(Serial);
+            }
+        } else if (upload.status == UPLOAD_FILE_END) {
+            if (Update.end(true)) {
+                Serial.printf("Update Success: %u bytes\n", upload.totalSize);
+            } else {
+                Update.printError(Serial);
+            }
+        }
+    });
+    webServer.begin();
+}
+
+// =========================================================================
+// ESP-NOW RECEIVE CALLBACK
+// =========================================================================
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+    if (len == sizeof(TelemetryPacket)) {
+        memcpy(&current_pkt, incomingData, sizeof(TelemetryPacket));
+        last_pkt_rx_time = millis();
+        esp_now_connected = true;
+    }
+}
+
+// =========================================================================
+// DRAW GAUGES ON 240x240 CIRCULAR DISPLAY SPRITE
+// =========================================================================
+void render_gauge_ui(const TelemetryPacket &pkt, bool is_demo) {
+    spr.fillSprite(COLOR_BG);
+
+    const int cx = 120;
+    const int cy = 120;
+
+    // 1. Shift Light Outer LED Arch at top (12 LEDs across top from 210° to 330°)
+    float shiftStart = 210.0f * DEG_TO_RAD;
+    float shiftEnd = 330.0f * DEG_TO_RAD;
+    const int ledCount = 12;
+    float rpmPct = min(1.0f, (float)pkt.rpm / 7000.0f);
+
+    for (int i = 0; i < ledCount; i++) {
+        float angle = shiftStart + ((float)i / (ledCount - 1)) * (shiftEnd - shiftStart);
+        int lx = cx + cos(angle) * 110;
+        int ly = cy + sin(angle) * 110;
+        float threshold = (float)(i + 1) / ledCount;
+
+        if (rpmPct >= threshold) {
+            uint16_t c = COLOR_GREEN;
+            if (i >= 8) c = COLOR_RED;
+            else if (i >= 4) c = COLOR_YELLOW;
+            spr.fillCircle(lx, ly, 4, c);
+        } else {
+            spr.fillCircle(lx, ly, 4, COLOR_DARK_GRAY);
+        }
+    }
+
+    // 2. RPM Outer Arc Sweep (45° to 315° clockwise across arc = 270° total sweep, 180° rotated)
+    float rpmRatio = min(1.0f, (float)pkt.rpm / 8000.0f);
+    uint32_t rpmEndDeg = (45 + (uint32_t)(rpmRatio * 270.0f)) % 360;
+
+    // Background RPM track (smooth anti-aliased)
+    spr.drawSmoothArc(cx, cy, 98, 90, 45, 315, COLOR_DARK_GRAY, COLOR_BG, false);
+
+    // Active RPM Arc (smooth anti-aliased)
+    if (rpmRatio > 0.01f) {
+        uint16_t rpmColor = COLOR_CYAN;
+        if (rpmRatio > 0.85f) rpmColor = COLOR_RED;
+        else if (rpmRatio > 0.65f) rpmColor = COLOR_YELLOW;
+        else if (rpmRatio > 0.35f) rpmColor = COLOR_GREEN;
+
+        spr.drawSmoothArc(cx, cy, 98, 90, 45, rpmEndDeg, rpmColor, COLOR_BG, true);
+    }
+
+    // 3. Throttle Position Arc (60° to 120°, 60° sweep, 180° rotated)
+    float thRatio = min(1.0f, pkt.throttle_pct / 100.0f);
+    uint32_t thEndDeg = 60 + (uint32_t)(thRatio * 60.0f);
+
+    spr.drawSmoothArc(cx, cy, 82, 76, 60, 120, COLOR_DARK_GRAY, COLOR_BG, false);
+    if (thRatio > 0.01f) {
+        spr.drawSmoothArc(cx, cy, 82, 76, 60, thEndDeg, COLOR_GREEN, COLOR_BG, true);
+    }
+
+    // 4. Brake Pressure Arc (240° to 300°, 60° sweep, 180° rotated)
+    float brRatio = min(1.0f, (float)pkt.brake_bar / 150.0f);
+    uint32_t brStartDeg = 300 - (uint32_t)(brRatio * 60.0f);
+
+    spr.drawSmoothArc(cx, cy, 82, 76, 240, 300, COLOR_DARK_GRAY, COLOR_BG, false);
+    if (brRatio > 0.01f) {
+        spr.drawSmoothArc(cx, cy, 82, 76, brStartDeg, 300, COLOR_BLUE, COLOR_BG, true);
+    }
+
+    // Readout labels on sides (positioned right up against inside of throttle/brake slider arcs)
+    spr.setTextColor(COLOR_GREEN, COLOR_BG);
+    spr.setTextDatum(ML_DATUM);
+    spr.drawString(String(pkt.throttle_pct) + "%", cx - 70, cy);
+
+    spr.setTextColor(COLOR_BLUE, COLOR_BG);
+    spr.setTextDatum(MR_DATUM);
+    spr.drawString(String(pkt.brake_bar) + "B", cx + 70, cy);
+
+    // 5. Steering Angle Dial (Top Part of Screen at 270°)
+    float stAngleRad = (pkt.steering_deg / 540.0f) * (PI * 0.4f);
+    float stDotAngle = (270.0f * DEG_TO_RAD) + stAngleRad;
+    int stX = cx + cos(stDotAngle) * 58;
+    int stY = cy + sin(stDotAngle) * 58;
+    spr.fillCircle(stX, stY, 3, COLOR_CYAN);
+
+    spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
+    spr.setTextDatum(TC_DATUM);
+    String stStr = (pkt.steering_deg == 0) ? "0°" : (pkt.steering_deg > 0 ? String(pkt.steering_deg) + "°R" : String(abs(pkt.steering_deg)) + "°L");
+    spr.drawString(stStr, cx, cy - 50);
+
+    // 6. Central Digital Speedometer Readout
+    spr.setTextColor(COLOR_WHITE, COLOR_BG);
+    spr.setTextDatum(MC_DATUM);
+    uint16_t spd = pkt.speed_kmh_x10 / 10;
+    spr.drawString(String(spd), cx, cy + 8, 7); // Font 7 = 7-segment big font or large GLCD
+
+    spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
+    spr.drawString("KM/H", cx, cy + 32);
+
+    // 7. Coolant Temp Badge (Bottom Left)
+    float waterC = pkt.water_temp_x10 / 10.0f;
+    bool isOverheat = waterC > 105.0f;
+    spr.setTextColor(isOverheat ? COLOR_RED : COLOR_YELLOW, COLOR_BG);
+    spr.setTextDatum(MC_DATUM);
+    spr.drawString(String((int)waterC) + "°C", cx - 48, cy + 62);
+
+    // 8. Fuel Level Badge (Bottom Center)
+    uint8_t fuel = pkt.fuel_pct;
+    bool isLowFuel = fuel <= 15;
+    spr.setTextColor(isLowFuel ? COLOR_RED : COLOR_GREEN, COLOR_BG);
+    spr.setTextDatum(MC_DATUM);
+    spr.drawString("F:" + String(fuel) + "%", cx, cy + 62);
+
+    // 9. Gear Indicator Badge (Bottom Right)
+    const char* gearStr = "N";
+    switch(pkt.gear) {
+        case 0: gearStr = "P"; break;
+        case 1: gearStr = "R"; break;
+        case 2: gearStr = "N"; break;
+        case 3: gearStr = "D"; break;
+        case 4: gearStr = "S"; break;
+        case 5: gearStr = "1"; break;
+        case 6: gearStr = "2"; break;
+        case 7: gearStr = "3"; break;
+        case 8: gearStr = "4"; break;
+        case 9: gearStr = "5"; break;
+        case 10: gearStr = "6"; break;
+        default: gearStr = "D"; break;
+    }
+    spr.drawCircle(cx + 48, cy + 62, 12, COLOR_CYAN);
+    spr.setTextColor(COLOR_WHITE, COLOR_BG);
+    spr.drawString(gearStr, cx + 48, cy + 62);
+
+    // 9. Top Status Badge (DEMO SWEEP / ESP-NOW status)
+    spr.setTextColor(is_demo ? COLOR_YELLOW : COLOR_CYAN, COLOR_BG);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(is_demo ? "DEMO SWEEP" : "ESP-NOW 20Hz", cx, 16);
+
+    // Push Sprite to Screen
+    spr.pushSprite(0, 0);
+}
+
+// =========================================================================
+// SETUP
+// =========================================================================
+void setup() {
+    Serial.begin(115200);
+    delay(300);
+
+    Serial.println("\n=================================================================");
+    Serial.println(" 🏎️ espDash XIAO ROUND GAUGE (esp32-gauge-round.local)");
+    Serial.println(" DISPLAY: GC9A01 240x240 Round TFT (SPI)");
+    Serial.println("=================================================================");
+
+    // Turn on display backlight (GPIO 43 on XIAO ESP32-S3 round expansion board)
+    pinMode(43, OUTPUT);
+    digitalWrite(43, HIGH);
+
+    // Initialize GC9A01 TFT Display
+    tft.init();
+    tft.setRotation(0); // Hardware rotation 0 (rotates full screen and all elements by 180 degrees)
+    tft.fillScreen(TFT_BLACK);
+
+    // Configure Multi-Wi-Fi Networks
+    wifiMulti.addAP("Complex_parking", "12345678");
+    wifiMulti.addAP("Bazanski_ph", "52288488");
+    wifiMulti.addAP("Bazanski_IS", "52288488");
+    wifiMulti.addAP("IOT-monday", "fsdL2Dp*KBU0y#9F&c!Zbq853axj");
+
+    // Render 3-Second Startup Splash Screen with IP Address or Standalone ESP-NOW
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawCentreString("espDash Telemetry", 120, 65, 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawCentreString("XIAO Round Gauge Ready", 120, 110, 2);
+
+    // Wi-Fi connection attempt with strict 15-second timeout
+    uint32_t start_connect = millis();
+    bool wifi_ok = false;
+    while (millis() - start_connect < 15000) {
+        if (wifiMulti.run() == WL_CONNECTED) {
+            wifi_ok = true;
+            break;
+        }
+        delay(150);
+        String dots = "Connecting";
+        int cnt = ((millis() - start_connect) / 400) % 4;
+        for (int i = 0; i < cnt; i++) dots += ".";
+        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+        tft.drawCentreString(dots + "   ", 120, 150, 2);
+    }
+
+    if (wifi_ok) {
+        String ssidStr = "SSID: " + WiFi.SSID();
+        String ipStr   = "IP: " + WiFi.localIP().toString();
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.drawCentreString(ssidStr, 120, 140, 2);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.drawCentreString(ipStr, 120, 162, 2);
+
+        MDNS.begin("esp32-gauge-round");
+        ArduinoOTA.setHostname("esp32-gauge-round");
+        ArduinoOTA.begin();
+        setup_web_ota();
+    } else {
+        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+        tft.drawCentreString("Standalone (ESP-NOW)", 120, 150, 2);
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_STA);
+        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE); // Lock channel for lag-free ESP-NOW
+    }
+
+    delay(2000);
+
+    spr.setColorDepth(16);
+    spr.createSprite(240, 240);
+
+    // ESP-NOW Setup
+    if (esp_now_init() == ESP_OK) {
+        esp_now_register_recv_cb(OnDataRecv);
+    }
+}
+
+// =========================================================================
+// MAIN LOOP
+// =========================================================================
+void loop() {
+    // Only process OTA & HTTP requests if Wi-Fi is actively connected
+    if (WiFi.status() == WL_CONNECTED) {
+        ArduinoOTA.handle();
+        webServer.handleClient();
+    }
+
+    uint32_t now = millis();
+
+    // WiFi Maintenance & Auto-Reconnect
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.setAutoReconnect(true);
+    }
+
+    // Determine if receiving live telemetry or running fallback Demo Mode
+    bool is_demo = (now - last_pkt_rx_time > 3000);
+
+    TelemetryPacket active_pkt;
+    if (is_demo) {
+        float phase = now * 0.002f;
+        active_pkt.rpm = 3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500;
+        active_pkt.speed_kmh_x10 = (uint16_t)((90 + sin(phase * 0.8f) * 40) * 10);
+        active_pkt.water_temp_x10 = (int16_t)((92 + sin(phase * 0.2f) * 6) * 10);
+        active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
+        active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
+        active_pkt.brake_bar = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
+        active_pkt.gear = 4; // D
+    } else {
+        active_pkt = current_pkt;
+    }
+
+    render_gauge_ui(active_pkt, is_demo);
+    delay(20); // ~50 FPS target
+}

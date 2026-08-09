@@ -1,38 +1,38 @@
-# 📊 2014 Honda Civic (9th Gen) CAN Bus Protocol Map
+# Honda Civic 2014 (9th Gen) CAN Bus Signal Matrix & Protocol Registry
 
-Reverse-engineered from live 500 kbps F-CAN bus dumps.
-
----
-
-## 🏎️ Broadcast F-CAN Bus Value Table (11-bit CAN IDs)
-
-| CAN ID | Frequency | Parameter Name | Decoding Formula / Unit | Sample Raw Hex | Live Value |
-| :---: | :---: | :--- | :--- | :--- | :--- |
-| **`0x17C`** | 100 Hz | **Engine Speed, Brake & CEL** | `(Byte[2] << 8) \| Byte[3]` (RPM), `Byte[0] & 0x02` (CEL Check Engine Light), `Byte[0] & 0x20` (Brake Switch) | `22 00 02 BD 00 00 00 19` | **701 RPM**, CEL OFF, Brake Pressed |
-| **`0x156`** | 50 Hz | **Speed, Selector & Paddle Gear**| `Byte[1] / 2` (km/h), `Byte[4]` (P=0/1, R=2, N=3, D=4, S=5, Paddles 1-6=6-11) | `FF B8 00 02 07 3F` | **0 km/h (P / R / N / D / S / 1-6)** |
-| **`0x1A4`** | 50 Hz | **Throttle Position / Load** | `Byte[1]` (0–255 scale) | `00 66 00 00 00 00 00 3A` | **40 %** |
-| **`0x091`** | 50 Hz | **Calculated Engine Load** | `Byte[0]` (%) | `80 2C 87 ED FF 00 00 2E` | **50.1 %** |
-| **`0x1D0`** | 10 Hz | **Coolant Temperature** | `Byte[0] - 40` (°C) | `00 80 00 00 00 00 00 0A` | **88.0 °C** |
-| **`0x1AA`** | 50 Hz | **Steering Wheel Angle** | `(int16_t)((Byte[0]<<8)\|Byte[1])` (deg) | `7F FF 00 00 00 00 66 30` | **0.0°** |
-| **`0x1B0`** | 50 Hz | **Hydraulic Brake Pressure** | `Byte[1]` (0–150 Bar) | `00 0F 00 00 00 00 3A` | **15 Bar** |
-| **`0x1A0`** | 50 Hz | **VSA / ABS / TC & Warnings**| `Byte[0] & 0x02` (TC Active), `Byte[0] & 0x04` (VSA Warning), `Byte[1] & 0x08` (ABS Active), `Byte[1] & 0x01` (ABS Fault) | `02 08 00 00 00 00 00 00` | **ABS Engaged / TC Engaged / Warnings** |
-| **`0x200`** | 50 Hz | **Front Left & Right Wheel Speeds**| `((Byte[0]<<8)\|Byte[1]) / 10.0` (FL), `((Byte[2]<<8)\|Byte[3]) / 10.0` (FR km/h) | `00 00 00 00 00 00` | **0.0 km/h (FL / FR)** |
-| **`0x201`** | 50 Hz | **Rear Left & Right Wheel Speeds** | `((Byte[0]<<8)\|Byte[1]) / 10.0` (RL), `((Byte[2]<<8)\|Byte[3]) / 10.0` (RR km/h) | `00 00 00 00 00 00` | **0.0 km/h (RL / RR)** |
-| **`0x158`** | 10 Hz | **Oil Pressure Warning & Temp** | `Byte[0] & 0x01` (Low Oil Pressure Warning Light) | `01 00 00 00 80` | **Low Oil Pressure Warning** |
-| **`0x1DC`** | 20 Hz | **Target Idle Setpoint** | `(Byte[1] << 8) \| Byte[2]` (RPM) | `02 02 BC 30` | **700 RPM Target** |
-| **`0x13C`** | 10 Hz | **Fuel Tank Level & Range**| `Byte[1]` (Fuel Level %) | `00 4D 00 98 00 00 04 20` | **77 % Fuel** |
-| **`0x305`** | 5 Hz | **Ambient Outdoor Air Temp**| `Byte[0] - 40` (°C) | `8E 14 00 00 00 00 05` | **22.0 °C** |
-| **`0x309`** | 5 Hz | **12V Battery Voltage** | `Byte[1] / 10.0` (Volts) | `00 8A 00 00 00 00 00 0C` | **13.8 Volts** |
+This document serves as the authoritative protocol map for decoding F-CAN (500 kbps) telemetry signals for `espDash`.
 
 ---
 
-## 🔬 OBD-II Diagnostic Value Table (29-bit CAN IDs)
+## 🟢 Category A: Fully Verified & Working Live in Car
 
-* **Request ID:** `0x18DB33F1` $\to$ **Response ID:** `0x18DAF10E`
+| Signal Name | CAN ID (Hex) | Rate | Byte Position & Decoding Formula | Verified Live Range / Values | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Engine RPM** | `0x1DC` | 50 Hz | `((data[1] << 8) \| data[2])` RPM | `650 - 4,957 RPM` | 🟢 **VERIFIED IN CAR** |
+| **Coolant Temp (°C)** | `0x324` | 10 Hz | `(float)data[0] - 40.0f` °C | **`86.0 - 87.0 °C`** | 🟢 **VERIFIED IN CAR** |
+| **Steering Wheel Angle** | `0x156` | 50 Hz | `(int16_t)((data[0] << 8) \| data[1]) / 9.0f` ° | **`0°` Center, `-540°` Full Left, `+540°` Full Right** | 🟢 **VERIFIED IN CAR** |
+| **12V Battery Voltage** | `0x305` | 5 Hz | `data[0] * 100` mV | **`14.2 Volts`** (Charging idle voltage) | 🟢 **VERIFIED IN CAR** |
+| **Outdoor Ambient Temp** | `0x21E` / `0x372` | 5 Hz | `data[4]` on `0x21E` or `data[0]` on `0x372` °C | **`32 °C`** (Matches vehicle dash display) | 🟢 **VERIFIED IN CAR** |
+| **Fuel Level (%)** | `0x324` | 10 Hz | `(data[1] / 2.0f)` % | **`50.0% - 53.0%`** (Matches physical fuel tank) | 🟢 **VERIFIED IN CAR** |
 
-| Mode / PID | Parameter Name | Decoding Formula | Live Value Captured |
-| :---: | :--- | :--- | :--- |
-| **`01 0C`** | **Engine Speed RPM** | `((Byte[3] << 8) \| Byte[4]) / 4.0` | **701.0 RPM** |
-| **`01 05`** | **Engine Coolant Temp** | `Byte[3] - 40` (°C) | **92.0 °C** |
-| **`01 0D`** | **Vehicle Speed** | `Byte[3]` (km/h) | **0 km/h** |
-| **`01 5C`** | **Engine Oil Temperature** | `Byte[3] - 40` (°C) | **83.0 °C** |
+---
+
+## 🟡 Category B: Verified in Log / Calibrated for Fine Tuning
+
+| Signal Name | CAN ID (Hex) | Rate | Byte Position & Decoding Formula | Observed Behavior & Notes | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Accelerator Pedal (%)** | `0x17C` | 50 Hz | `(data[0] / 97.0f) * 100.0f` % | `0%` (Foot off pedal) ➔ `100%` (Full WOT pedal depth) | 🟡 **PEDAL SENSOR** |
+| **Gear Selection** | `0x188` | 50 Hz | `data[3]` (`0x04`=P, `0x01`=R, `0x08`=N, `0x00`=D, `0x02`=S) | Updated inverted shifter permutation mapping | 🟡 **VERIFIED MAP** |
+| **Vehicle Speed (km/h)** | `0x1D0` | 50 Hz | `((data[0] << 8) \| data[1]) / 10.0f` km/h | Low-speed FL wheel speed (reads 1-6 km/h crawling speed) | 🟡 **WHEEL SPREAD** |
+| **Brake Light Switch** | `0x1A4` | 50 Hz | `(data[0] > 0)` | `false` (released) / `true` (light pedal touch) | 🟡 **LIGHT SWITCH** |
+| **Brake Fluid Pressure** | `0x1A4` | 50 Hz | `(data[1] - 30) / 180.0f * 100.0f` % | `0 Bar` at resting idle ➔ `100 Bar` firm pressure | 🟡 **FLUID PRESSURE** |
+
+---
+
+## 🔴 Category C: Additional Parameters & Diagnostics
+
+| Signal Name | Target Parameter | CAN ID Candidate | Status & Action Required |
+| :--- | :--- | :--- | :--- |
+| **Individual Wheel Speeds** | `w_fl`, `w_fr`, `w_rl`, `w_rr` | `0x1D0` Bytes 0-7 | 🟢 Mapped: FL (Bytes 0-1), FR (Bytes 2-3), RL (Bytes 4-5), RR (Bytes 6-7) |
+| **Check Engine Light (CEL)** | `flags & 0x08` | `0x1A0` / `0x1DC` | 🔴 Check error warning bits |
+| **Shift Light Warning** | `flags & 0x02` | `0x1DC` RPM > 6800 RPM | 🟢 Active at 6,800 RPM threshold |
