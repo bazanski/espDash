@@ -120,6 +120,12 @@ static WiFiClient telnetClient;
 static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint16_t espnow_seq = 0;
 static String last_connected_ip = "";
+static volatile uint32_t espnow_send_fail = 0;
+
+// Once true, Wi-Fi has been deliberately abandoned for the rest of this boot
+// so ESP-NOW can sit on a fixed, stable channel. See the fallback logic in
+// loop() for why this exists.
+static volatile bool wifi_fallback_engaged = false;
 
 static volatile uint32_t tx_truncated = 0;
 
@@ -249,12 +255,15 @@ static void process_cmd_string(String cmd) {
     } else if (cmd == "STATS") {
         char buf[160];
         snprintf(buf, sizeof(buf),
-                 "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu tx_trunc:%lu\n",
+                 "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
+                 "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
                  (unsigned long)twai_queue_full_events,
-                 (unsigned long)tx_truncated);
+                 (unsigned long)tx_truncated,
+                 (unsigned long)espnow_send_fail,
+                 wifi_fallback_engaged ? "yes" : "no");
         broadcast_line(buf);
     }
 }
@@ -453,7 +462,14 @@ static void publishTask(void *arg) {
             t->wheel_rl_x10    = snap.wheel_rl_x10;
             t->wheel_rr_x10    = snap.wheel_rr_x10;
 
-            esp_now_send(broadcast_mac, pkt, sizeof(pkt));
+            // peer.channel = 0 makes ESP-NOW follow the station's current
+            // channel, which is only well-defined while genuinely associated.
+            // A failure here is exactly the failure mode that motivated the
+            // fallback in loop(): silent while Wi-Fi is mid-reconnect, and
+            // otherwise invisible without this counter.
+            if (esp_now_send(broadcast_mac, pkt, sizeof(pkt)) != ESP_OK) {
+                espnow_send_fail++;
+            }
         }
 
         // ---- 6. JSON telemetry @10Hz ------------------------------------
@@ -611,6 +627,7 @@ void setup() {
 // =========================================================================
 void loop() {
     static uint32_t last_wifi_check = 0, last_diag = 0;
+    static uint32_t wifi_lost_since = 0;
 
     if (WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.handle();
@@ -621,6 +638,7 @@ void loop() {
     if (now - last_wifi_check >= 5000) {
         last_wifi_check = now;
         if (WiFi.status() == WL_CONNECTED) {
+            wifi_lost_since = 0;
             String ip = WiFi.localIP().toString();
             if (ip != last_connected_ip) {
                 last_connected_ip = ip;
@@ -629,6 +647,40 @@ void loop() {
             }
         } else {
             last_connected_ip = "";
+
+            // Wi-Fi that connected at boot and later drops (car drives out of
+            // AP range) is NOT the same case as "no AP found within 15s at
+            // boot" - only the latter was ever handled, by locking to a fixed
+            // channel once in setup(). At runtime, WiFi.setAutoReconnect(true)
+            // instead leaves the radio scanning/roaming indefinitely, which
+            // means the ESP-NOW peer's channel=0 ("follow the station") is
+            // tracking a channel that keeps moving or is transiently
+            // undefined mid-reconnect. esp_now_send() can then fail silently
+            // - nothing checked its return value before espnow_send_fail was
+            // added - and the display node's own channel sweep has no fixed
+            // target to lock onto, so it searches indefinitely. A full
+            // gateway reboot "fixes" it only because it re-runs the boot-time
+            // timeout path and lands back on a stable, fixed channel.
+            //
+            // So: give a real reconnect attempt 20s (a couple of AP retry
+            // cycles), then deliberately abandon Wi-Fi for the rest of this
+            // boot and fall back to the same fixed-channel behavior the
+            // boot-time timeout already uses. ESP-NOW telemetry is the
+            // higher-priority function while driving; regaining the
+            // dashboard/OTA link can wait for the next reboot.
+            if (!wifi_fallback_engaged) {
+                if (wifi_lost_since == 0) {
+                    wifi_lost_since = now;
+                } else if (now - wifi_lost_since >= 20000) {
+                    wifi_fallback_engaged = true;
+                    Serial.println("[Wi-Fi] Lost for 20s - abandoning reconnect, "
+                                   "locking ESP-NOW to channel 1 for stability");
+                    WiFi.setAutoReconnect(false);
+                    WiFi.disconnect(true, true);
+                    WiFi.mode(WIFI_STA);
+                    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+                }
+            }
         }
     }
 
