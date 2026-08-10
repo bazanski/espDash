@@ -31,6 +31,15 @@
 #define ESPDASH_PROTO_MAJOR 2
 #define ESPDASH_PROTO_MINOR 1
 
+// Fixed 2.4 GHz channel for ESP-NOW when a device never associates to Wi-Fi.
+// Only channels 1/6/11 are non-overlapping (WiFi channels are ~22 MHz wide on
+// a 5 MHz grid, so anything in between catches interference splash from two
+// neighbors at once). 1 is used because it's what every device in this
+// project already defaulted to and it's the value proven on the bench
+// (100% delivery, 0 gaps, 20 Hz over 244+ packets) - switch to 6 or 11 here,
+// in one place, if a specific location ever shows contention on 1.
+#define ESPDASH_ESPNOW_CHANNEL 1
+
 // Message types. 1 is the only one implemented today; the rest are reserved so
 // a future node-status or IMU packet does not need a major version bump.
 enum {

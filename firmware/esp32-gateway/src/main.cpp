@@ -7,8 +7,9 @@
 // CONCURRENCY
 //   core 1  canRxTask   (prio 10) - twai_receive + decode + ring_push. No I/O.
 //   core 1  publishTask (prio 5)  - ALL output: raw drain, JSON, ESP-NOW, and
-//                                   every WebSocket/telnet/Serial call.
-//   core 1  loopTask    (prio 1)  - ArduinoOTA + Wi-Fi maintenance only.
+//                                   Serial (+ WebSocket/telnet when enabled).
+//   core 1  loopTask    (prio 1)  - Wi-Fi/OTA maintenance when enabled, else
+//                                   just TWAI recovery checks.
 //   core 0                        - left to the Wi-Fi/lwIP and TinyUSB tasks.
 //
 // Priority, not core affinity, is what protects CAN reception here: canRxTask
@@ -20,19 +21,33 @@
 // lost frames. The ring buffer decouples the two; overflow now drops the
 // oldest frame and increments a counter reported as "dropped" in the JSON.
 //
-// The WebSockets library is NOT thread-safe: webSocket.loop() and
-// broadcastTXT() must both stay inside publishTask.
+// WIRELESS: gated behind ESPDASH_GATEWAY_WIFI (platformio.ini), OFF by
+// default. An on-car test showed the gateway's own Wi-Fi station -
+// scanning/associating/roaming - degrading the ESP-NOW link to the display
+// nodes even with power-save disabled and a runtime abandon-and-relock
+// fallback in place. Rather than patch that further, the default build never
+// attempts a Wi-Fi connection at all: no association, no scanning, no
+// roaming, nothing for a fallback to abandon. USB serial + ESP-NOW only. The
+// code for the old Wi-Fi-connected behavior (mDNS, ArduinoOTA, the WebSocket
+// dashboard path, Telnet) is preserved behind the flag, not deleted - see
+// ARCHITECTURE.md S5.1/S5.2 and set ESPDASH_GATEWAY_WIFI=1 to restore it.
+//
+// The WebSockets library is NOT thread-safe: when the flag is on,
+// webSocket.loop() and broadcastTXT() must both stay inside publishTask.
 // =========================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiMulti.h>
-#include <ESPmDNS.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include "driver/twai.h"
+
+#if ESPDASH_GATEWAY_WIFI
+#include <WiFiMulti.h>
+#include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <WebSocketsServer.h>
-#include "driver/twai.h"
+#endif
 
 #include <EspDashProto.h>
 #include "can_decode.h"
@@ -55,7 +70,9 @@ enum OperationalMode {
 
 static volatile OperationalMode current_mode = MODE_TELEMETRY;
 static volatile bool demo_mode = false;
+#if ESPDASH_GATEWAY_WIFI
 static volatile bool ota_in_progress = false;
+#endif
 
 // =========================================================================
 // SHARED STATE  (canRxTask writes, publishTask reads, guarded by spinlock)
@@ -113,20 +130,23 @@ static inline bool ring_pop(RawSlot *out) {
 // =========================================================================
 // NETWORK
 // =========================================================================
+#if ESPDASH_GATEWAY_WIFI
 static WiFiMulti wifiMulti;
 static WebSocketsServer webSocket = WebSocketsServer(8888);
 static WiFiServer telnetServer(8889);
 static WiFiClient telnetClient;
-static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static uint16_t espnow_seq = 0;
 static String last_connected_ip = "";
-static volatile uint32_t espnow_send_fail = 0;
 
 // Once true, Wi-Fi has been deliberately abandoned for the rest of this boot
 // so ESP-NOW can sit on a fixed, stable channel. See the fallback logic in
-// loop() for why this exists.
+// loop() for why this exists. Only meaningful when a connection was ever
+// attempted in the first place.
 static volatile bool wifi_fallback_engaged = false;
+#endif
 
+static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint16_t espnow_seq = 0;
+static volatile uint32_t espnow_send_fail = 0;
 static volatile uint32_t tx_truncated = 0;
 
 // USB CDC and TCP both accept short writes: write() returns how many bytes it
@@ -151,15 +171,17 @@ static void write_all(Print &out, const uint8_t *buf, size_t len) {
     if (sent < len) tx_truncated++;
 }
 
-// All three transports get byte-identical payloads. MUST only be called from
-// publishTask (WebSockets library is not thread-safe).
+// Every enabled transport gets a byte-identical payload. MUST only be called
+// from publishTask (WebSockets library is not thread-safe).
 static void broadcast_line(const char *str) {
     size_t len = strlen(str);
     write_all(Serial, (const uint8_t *)str, len);
+#if ESPDASH_GATEWAY_WIFI
     if (telnetClient && telnetClient.connected()) {
         write_all(telnetClient, (const uint8_t *)str, len);
     }
     webSocket.broadcastTXT((uint8_t *)str, len);
+#endif
 }
 
 // =========================================================================
@@ -254,6 +276,7 @@ static void process_cmd_string(String cmd) {
         broadcast_line(buf);
     } else if (cmd == "STATS") {
         char buf[160];
+#if ESPDASH_GATEWAY_WIFI
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s\n",
@@ -264,10 +287,26 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)tx_truncated,
                  (unsigned long)espnow_send_fail,
                  wifi_fallback_engaged ? "yes" : "no");
+#else
+        // No wifi_fallback field: with no Wi-Fi station ever attempted,
+        // there's no connection to fall back from. espnow_send_fail is still
+        // meaningful - esp_now_send() can fail for reasons unrelated to
+        // Wi-Fi, such as an internal queue full.
+        snprintf(buf, sizeof(buf),
+                 "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
+                 "tx_trunc:%lu espnow_fail:%lu\n",
+                 (unsigned long)g_snapshot.frames_decoded,
+                 (unsigned long)g_snapshot.checksum_rejects,
+                 (unsigned long)raw_dropped,
+                 (unsigned long)twai_queue_full_events,
+                 (unsigned long)tx_truncated,
+                 (unsigned long)espnow_send_fail);
+#endif
         broadcast_line(buf);
     }
 }
 
+#if ESPDASH_GATEWAY_WIFI
 static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
     if (type == WStype_TEXT) {
         String cmd = String((char *)payload, length);
@@ -277,6 +316,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_
         Serial.printf("[WebSocket] Client #%u connected from %s\n", num, ip.toString().c_str());
     }
 }
+#endif
 
 // =========================================================================
 // TWAI
@@ -382,6 +422,7 @@ static void publishTask(void *arg) {
             process_cmd_string(Serial.readStringUntil('\n'));
         }
 
+#if ESPDASH_GATEWAY_WIFI
         // ---- 2. Network servicing (all WebSocket calls live here) --------
         if (WiFi.status() == WL_CONNECTED) {
             webSocket.loop();
@@ -401,6 +442,7 @@ static void publishTask(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+#endif
 
         // ---- 3. Drain the raw ring --------------------------------------
         // Budget per pass keeps JSON/ESP-NOW cadence from being starved by a
@@ -463,10 +505,12 @@ static void publishTask(void *arg) {
             t->wheel_rr_x10    = snap.wheel_rr_x10;
 
             // peer.channel = 0 makes ESP-NOW follow the station's current
-            // channel, which is only well-defined while genuinely associated.
-            // A failure here is exactly the failure mode that motivated the
-            // fallback in loop(): silent while Wi-Fi is mid-reconnect, and
-            // otherwise invisible without this counter.
+            // channel. With ESPDASH_GATEWAY_WIFI=0 (the default) that channel
+            // is fixed at boot and never changes, so this essentially cannot
+            // fail for channel reasons. With the flag on, a connection lost
+            // mid-run leaves the channel transiently undefined - the failure
+            // mode the loop() fallback exists to recover from - and this
+            // counter is what makes that failure visible instead of silent.
             if (esp_now_send(broadcast_mac, pkt, sizeof(pkt)) != ESP_OK) {
                 espnow_send_fail++;
             }
@@ -559,6 +603,7 @@ void setup() {
         Serial.println("[TWAI] INSTALL FAILED");
     }
 
+#if ESPDASH_GATEWAY_WIFI
     wifiMulti.addAP("Comlex_parking", "12345678");
     wifiMulti.addAP("Complex_parking", "12345678");
     wifiMulti.addAP("Bazanski_ph", "52288488");
@@ -594,11 +639,28 @@ void setup() {
         telnetServer.begin();
         telnetServer.setNoDelay(true);
     } else {
-        Serial.println("[Wi-Fi TIMEOUT] Not connected. Locking to channel 1 for ESP-NOW.");
+        Serial.println("[Wi-Fi TIMEOUT] Not connected. Locking to fixed channel for ESP-NOW.");
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_STA);
-        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
     }
+#else
+    // No Wi-Fi station is ever attempted: no association, no scanning, no
+    // roaming, and therefore nothing for a runtime fallback to abandon. This
+    // is what actually fixed the on-car ESP-NOW instability - see the banner
+    // comment at the top of this file. Set ESPDASH_GATEWAY_WIFI=1 in
+    // platformio.ini and rebuild to restore mDNS/OTA/WebSocket/Telnet.
+    Serial.println("[Wi-Fi] Disabled at build time (ESPDASH_GATEWAY_WIFI=0). USB + ESP-NOW only.");
+    // Order matters: disconnect(true, true)'s second argument stops the Wi-Fi
+    // radio outright (esp_wifi_stop()). WiFi.mode(WIFI_STA) must come AFTER
+    // it, since that's what restarts the radio into STA mode - reversing
+    // this order leaves the interface down and esp_now_send() failing with
+    // ESP_ERR_ESPNOW_IF on every call, which is exactly what happened here
+    // the first time this was written with the calls the other way round.
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+#endif
 
     // Wi-Fi STA modem sleep makes the radio doze between DTIM beacons, which
     // costs ESP-NOW packets on both ends of the link. The gateway is mains/
@@ -623,17 +685,20 @@ void setup() {
 }
 
 // =========================================================================
-// LOOP (core 1, prio 1) - OTA and Wi-Fi maintenance only
+// LOOP (core 1, prio 1) - Wi-Fi/OTA maintenance when enabled, TWAI recovery
+// always
 // =========================================================================
 void loop() {
-    static uint32_t last_wifi_check = 0, last_diag = 0;
+    static uint32_t last_diag = 0;
+    uint32_t now = millis();
+
+#if ESPDASH_GATEWAY_WIFI
+    static uint32_t last_wifi_check = 0;
     static uint32_t wifi_lost_since = 0;
 
     if (WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.handle();
     }
-
-    uint32_t now = millis();
 
     if (now - last_wifi_check >= 5000) {
         last_wifi_check = now;
@@ -662,27 +727,26 @@ void loop() {
             // gateway reboot "fixes" it only because it re-runs the boot-time
             // timeout path and lands back on a stable, fixed channel.
             //
-            // So: give a real reconnect attempt 20s (a couple of AP retry
-            // cycles), then deliberately abandon Wi-Fi for the rest of this
-            // boot and fall back to the same fixed-channel behavior the
-            // boot-time timeout already uses. ESP-NOW telemetry is the
-            // higher-priority function while driving; regaining the
-            // dashboard/OTA link can wait for the next reboot.
+            // This mitigation is what ESPDASH_GATEWAY_WIFI=0 (the default)
+            // supersedes: with no Wi-Fi ever attempted, there's nothing to
+            // lose and nothing to abandon. Kept here, gated, for when Wi-Fi
+            // is deliberately re-enabled.
             if (!wifi_fallback_engaged) {
                 if (wifi_lost_since == 0) {
                     wifi_lost_since = now;
                 } else if (now - wifi_lost_since >= 20000) {
                     wifi_fallback_engaged = true;
                     Serial.println("[Wi-Fi] Lost for 20s - abandoning reconnect, "
-                                   "locking ESP-NOW to channel 1 for stability");
+                                   "locking ESP-NOW to a fixed channel for stability");
                     WiFi.setAutoReconnect(false);
                     WiFi.disconnect(true, true);
                     WiFi.mode(WIFI_STA);
-                    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+                    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
                 }
             }
         }
     }
+#endif
 
     if (now - last_diag >= 5000) {
         last_diag = now;

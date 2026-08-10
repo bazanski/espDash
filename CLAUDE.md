@@ -6,11 +6,13 @@
   ```bash
   ~/.platformio/penv/bin/pio run -d firmware/esp32-gateway
   ```
-- **Flash Gateway Wirelessly (OTA):**
+- **Flash Gateway Wirelessly (OTA):** requires building with `-DESPDASH_GATEWAY_WIFI=1` in
+  `firmware/esp32-gateway/platformio.ini` first — the gateway's Wi-Fi station is disabled by default
+  (see `docs/ARCHITECTURE.md` S5.2), so OTA won't be reachable otherwise.
   ```bash
   ~/.platformio/penv/bin/pio run -t upload --upload-port esp32-gateway.local -d firmware/esp32-gateway
   ```
-- **Flash Gateway over USB:**
+- **Flash Gateway over USB** (works regardless of the flag — the normal path now):
   ```bash
   ~/.platformio/penv/bin/pio run -t upload --upload-port /dev/cu.usbmodem101 -d firmware/esp32-gateway
   ```
