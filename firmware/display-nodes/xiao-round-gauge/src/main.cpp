@@ -1,13 +1,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiMulti.h>
-#include <ESPmDNS.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
-#include <ArduinoOTA.h>
-#include <WebServer.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
+
+#if ESPDASH_NODE_WIFI
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
+#include <WebServer.h>
+#endif
 
 // =========================================================================
 // ESP-NOW TELEMETRY - shared wire protocol
@@ -25,15 +27,22 @@ static volatile uint32_t pkt_gaps = 0;      // missed sequence numbers
 static volatile uint32_t pkt_count = 0;     // valid packets since boot
 static bool      ever_linked = false;
 
-// ---- ESP-NOW channel discovery -----------------------------------------
-// The gateway transmits on whatever channel its Wi-Fi AP uses. A node pinned
-// to channel 1 simply never hears a gateway on channel 6 - a silent, total
-// failure that gets more likely with every gauge added. So sweep the channels
-// until a valid packet arrives, then lock on.
-static uint8_t  espnow_channel = 1;
+// ---- ESP-NOW channel ----------------------------------------------------
+// With ESPDASH_NODE_WIFI=0 (the default) this node never associates to
+// Wi-Fi, so it locks to ESPDASH_ESPNOW_CHANNEL in setup() - the same fixed
+// constant the gateway uses - and never needs to move. The channel-sweep
+// logic below only runs when the flag is on: in that mode the node's own
+// Wi-Fi may park the radio on whatever channel a real AP uses, which
+// silently deafens it to the gateway's fixed-channel broadcasts whenever the
+// two don't match (measured on the bench: 0 packets received, holding
+// steady on the AP's channel for 29+ seconds). Sweeping is how a Wi-Fi-
+// connected node finds the gateway anyway in that case.
+static uint8_t  espnow_channel = ESPDASH_ESPNOW_CHANNEL;
 static bool     channel_locked = false;
+#if ESPDASH_NODE_WIFI
 static uint32_t last_channel_hop = 0;
 #define CHANNEL_HOP_MS   200    // dwell per channel while searching
+#endif
 #define LINK_TIMEOUT_MS  1500   // no valid packet => link considered lost
 
 // LINK_LOST is deliberately distinct from LINK_SEARCHING: a gauge that had a
@@ -70,9 +79,18 @@ static TFT_eSprite spr = TFT_eSprite(&tft);
 #define COLOR_DARK_GRAY 0x18E3 // Track bg gray
 
 // =========================================================================
-// MULTI-WIFI & WEB OTA SERVER
+// MULTI-WIFI & WEB OTA SERVER  (ESPDASH_NODE_WIFI=1 only)
 // =========================================================================
-static WiFiMulti wifiMulti;
+#if ESPDASH_NODE_WIFI
+struct WifiNet { const char *ssid, *pass; };
+static const WifiNet WIFI_NETS[] = {
+    {"Complex_parking", "12345678"},
+    {"Bazanski_ph",     "52288488"},
+    {"Bazanski_IS",     "52288488"},
+    {"IOT-monday",      "fsdL2Dp*KBU0y#9F&c!Zbq853axj"},
+};
+static const int WIFI_NET_COUNT = sizeof(WIFI_NETS) / sizeof(WIFI_NETS[0]);
+
 static WebServer webServer(80);
 static uint32_t last_wifi_check = 0;
 
@@ -117,6 +135,7 @@ void setup_web_ota() {
     });
     webServer.begin();
 }
+#endif  // ESPDASH_NODE_WIFI
 
 // =========================================================================
 // ESP-NOW RECEIVE CALLBACK
@@ -346,12 +365,6 @@ void setup() {
     tft.setRotation(0); // Hardware rotation 0 (rotates full screen and all elements by 180 degrees)
     tft.fillScreen(TFT_BLACK);
 
-    // Configure Multi-Wi-Fi Networks
-    wifiMulti.addAP("Complex_parking", "12345678");
-    wifiMulti.addAP("Bazanski_ph", "52288488");
-    wifiMulti.addAP("Bazanski_IS", "52288488");
-    wifiMulti.addAP("IOT-monday", "fsdL2Dp*KBU0y#9F&c!Zbq853axj");
-
     // Render 3-Second Startup Splash Screen with IP Address or Standalone ESP-NOW
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -359,20 +372,40 @@ void setup() {
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawCentreString("XIAO Round Gauge Ready", 120, 110, 2);
 
-    // Wi-Fi connection attempt with strict 15-second timeout
+#if ESPDASH_NODE_WIFI
+    // Wi-Fi connection attempt, hard-bounded to 15s total.
+    //
+    // This used to call WiFiMulti's run(), wrapped in the same 15s while-loop
+    // structure still below - and still hung indefinitely anyway. run() is a
+    // single blocking call, and an AP replying "association refused, comeback
+    // time" makes the ESP-IDF driver honor that backoff *inside* the call, so
+    // control never returns to let the outer loop's deadline check run at
+    // all. Measured on the bench: 75+ seconds of total silence with no bound
+    // whatsoever, after exactly that AP response.
+    //
+    // WiFi.begin() returns immediately (the connection happens in the
+    // background) and WiFi.status() is a cheap, non-blocking poll, so a loop
+    // built on those genuinely enforces a deadline no matter what the driver
+    // or a hostile AP does underneath - which is the actual point of having
+    // a timeout here at all.
     uint32_t start_connect = millis();
     bool wifi_ok = false;
-    while (millis() - start_connect < 15000) {
-        if (wifiMulti.run() == WL_CONNECTED) {
-            wifi_ok = true;
-            break;
+    for (int i = 0; i < WIFI_NET_COUNT && !wifi_ok && (millis() - start_connect < 15000); i++) {
+        WiFi.begin(WIFI_NETS[i].ssid, WIFI_NETS[i].pass);
+        uint32_t attempt_start = millis();
+        // Budget each network a slice of the total, but never overrun it.
+        uint32_t per_net_budget = 15000 / WIFI_NET_COUNT;
+        while (millis() - attempt_start < per_net_budget &&
+               millis() - start_connect < 15000) {
+            if (WiFi.status() == WL_CONNECTED) { wifi_ok = true; break; }
+            delay(150);
+            String dots = "Connecting";
+            int cnt = ((millis() - start_connect) / 400) % 4;
+            for (int j = 0; j < cnt; j++) dots += ".";
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            tft.drawCentreString(dots + "   ", 120, 150, 2);
         }
-        delay(150);
-        String dots = "Connecting";
-        int cnt = ((millis() - start_connect) / 400) % 4;
-        for (int i = 0; i < cnt; i++) dots += ".";
-        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-        tft.drawCentreString(dots + "   ", 120, 150, 2);
+        if (!wifi_ok) WiFi.disconnect();
     }
 
     if (wifi_ok) {
@@ -392,8 +425,22 @@ void setup() {
         tft.drawCentreString("Standalone (ESP-NOW)", 120, 150, 2);
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_STA);
-        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE); // Lock channel for lag-free ESP-NOW
+        esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
     }
+#else
+    // No Wi-Fi is ever attempted: no association, so no chance of parking the
+    // radio on a channel that doesn't match the gateway's fixed
+    // ESPDASH_ESPNOW_CHANNEL. Order matters here - disconnect(true, true)'s
+    // second argument stops the radio outright, so WiFi.mode(WIFI_STA) must
+    // come AFTER it to restart it into STA mode; reversed, ESP-NOW fails
+    // every send with ESP_ERR_ESPNOW_IF (found and fixed on the gateway the
+    // same way earlier this session).
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawCentreString("Standalone (ESP-NOW)", 120, 150, 2);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+#endif
 
     delay(2000);
 
@@ -416,24 +463,32 @@ void setup() {
 // MAIN LOOP
 // =========================================================================
 void loop() {
+#if ESPDASH_NODE_WIFI
     // Only process OTA & HTTP requests if Wi-Fi is actively connected
     if (WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.handle();
         webServer.handleClient();
     }
+#endif
 
     uint32_t now = millis();
 
+#if ESPDASH_NODE_WIFI
     // WiFi Maintenance & Auto-Reconnect
     if (WiFi.status() == WL_CONNECTED) {
         WiFi.setAutoReconnect(true);
     }
+#endif
 
     // ---- ESP-NOW link supervision & channel discovery -------------------
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
 
+#if ESPDASH_NODE_WIFI
     // Only sweep when standalone: with Wi-Fi up the radio is already parked on
-    // the AP's channel and moving it would drop the connection and OTA.
+    // the AP's channel and moving it would drop the connection and OTA. With
+    // ESPDASH_NODE_WIFI=0 this whole block is compiled out - the node is
+    // already fixed on ESPDASH_ESPNOW_CHANNEL from setup() and never needs to
+    // move, so there's nothing to sweep for.
     if (!live && WiFi.status() != WL_CONNECTED) {
         if (channel_locked) {
             // We had a link and lost it - the gateway may have moved networks.
@@ -446,6 +501,7 @@ void loop() {
             esp_wifi_set_channel(espnow_channel, WIFI_SECOND_CHAN_NONE);
         }
     }
+#endif
 
     LinkState link = live ? LINK_LIVE : (ever_linked ? LINK_LOST : LINK_SEARCHING);
 
