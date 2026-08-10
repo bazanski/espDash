@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>espDash - ESP32 Screen 1-to-1 UI Builder (Experimental Preview)</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- TOP NAVIGATION HEADER -->
+        <header class="top-nav">
+            <div class="brand">
+                <span class="logo-icon">🏎️</span>
+                <span class="brand-title">espDash <span class="badge" style="background: rgba(255,204,0,0.2); border-color: #ffcc00; color: #ffcc00;">EXPERIMENTAL PREVIEW</span></span>
+            </div>
+            
+            <div class="preset-selector-group">
+                <label for="devicePresetSelect">Target Display:</label>
+                <select id="devicePresetSelect" class="styled-select">
+                    <optgroup label="Round Displays">
+                        <option value="xiao-round-240" selected>Seeed XIAO ESP32-S3 Round (240x240 Circle)</option>
+                        <option value="amoled-466">Waveshare 1.32" AMOLED (466x466 Circle)</option>
+                    </optgroup>
+                    <optgroup label="ESP32 LCD Boards">
+                        <option value="esp32-s3-lcd-314">ESP32-S3-LCD-3.14 (480x272 Rect)</option>
+                        <option value="waveshare-316">Waveshare 3.16" LCD (320x240 Rect)</option>
+                        <option value="waveshare-147">Waveshare 1.47" LCD (172x320 Portrait)</option>
+                    </optgroup>
+                    <optgroup label="OLED & Custom">
+                        <option value="oled-128x64">Generic OLED (128x64 Mono)</option>
+                    </optgroup>
+                </select>
+                <button id="resetLayoutBtn" class="btn-sm btn-secondary" title="Load Production Device Layout">🔄 Production Layout</button>
+            </div>
+
+            <div class="canvas-controls">
+                <div class="zoom-group">
+                    <button id="zoomOutBtn" class="btn-sm">-</button>
+                    <span id="zoomLabel">100%</span>
+                    <button id="zoomInBtn" class="btn-sm">+</button>
+                </div>
+                <button id="gridToggleBtn" class="btn-sm active" title="Toggle Grid Snapping">Grid: ON</button>
+                <button id="bezelToggleBtn" class="btn-sm active" title="Toggle Bezel Simulation">Bezel: ON</button>
+            </div>
+
+            <div class="action-buttons">
+                <button id="exportCodeBtn" class="btn btn-primary">⚡ Export C++ Code</button>
+                <button id="exportJsonBtn" class="btn btn-secondary">💾 Save Layout</button>
+                <button id="importJsonBtn" class="btn btn-secondary">📂 Load Layout</button>
+                <input type="file" id="fileInput" accept=".json" style="display: none;">
+            </div>
+        </header>
+
+        <!-- MAIN EDITOR WORKSPACE -->
+        <main class="workspace">
+            <!-- LEFT TOOLBAR / WIDGET PALETTE -->
+            <aside class="sidebar left-palette">
+                <div class="panel-header">
+                    <h3>Widgets Library</h3>
+                </div>
+                <div class="widget-list">
+                    <div class="widget-item" data-type="shift-lights">
+                        <span class="widget-icon">🚥</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Shift Lights</span>
+                            <span class="widget-desc">LED tachometer arch</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="smooth-arc">
+                        <span class="widget-icon">⭕</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Smooth Arc</span>
+                            <span class="widget-desc">AA gauge arc slider</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="digital-value">
+                        <span class="widget-icon">🔢</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Digital Readout</span>
+                            <span class="widget-desc">Formatted telemetry text</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="dial-needle">
+                        <span class="widget-icon">🧭</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Dial Needle</span>
+                            <span class="widget-desc">Analog gauge needle</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="bar-slider">
+                        <span class="widget-icon">📊</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Bar Slider</span>
+                            <span class="widget-desc">Linear progress bar</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="status-badge">
+                        <span class="widget-icon">🚨</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Status Light</span>
+                            <span class="widget-desc">Alert flag badge</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="text-label">
+                        <span class="widget-icon">🔤</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Text Label</span>
+                            <span class="widget-desc">Static label header</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="card-box">
+                        <span class="widget-icon">🔲</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Card Panel</span>
+                            <span class="widget-desc">Background container</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-header">
+                    <h3>Layers</h3>
+                </div>
+                <div id="layersList" class="layers-list">
+                    <!-- Dynamic Layer items populated here -->
+                </div>
+            </aside>
+
+            <!-- CENTER CANVAS VIEWPORT -->
+            <section class="viewport-area">
+                <div class="viewport-wrapper" id="viewportWrapper">
+                    <div class="bezel-frame round-display" id="bezelFrame">
+                        <canvas id="displayCanvas" width="240" height="240"></canvas>
+                        <div class="canvas-overlay-nodes" id="canvasOverlay"></div>
+                    </div>
+                </div>
+                <div class="viewport-info-bar">
+                    <span id="canvasDimInfo">Resolution: 240 × 240 (ROUND RGB565)</span>
+                    <span id="cursorPosInfo">X: 0, Y: 0</span>
+                    <span id="fpsInfo">Simulation: 50 FPS</span>
+                </div>
+            </section>
+
+            <!-- RIGHT INSPECTOR / PROPERTIES PANEL -->
+            <aside class="sidebar right-inspector">
+                <div class="panel-header">
+                    <h3 id="inspectorTitle">Widget Inspector</h3>
+                </div>
+                <div id="inspectorContent" class="inspector-content">
+                    <p class="no-selection-msg">Select a widget on the canvas to configure properties</p>
+                </div>
+            </aside>
+        </main>
+
+        <!-- BOTTOM TELEMETRY SIMULATOR & LIVE HARDWARE BRIDGE -->
+        <footer class="bottom-bar">
+            <div class="telemetry-sim-panel">
+                <div class="sim-header">
+                    <span class="sim-title">🏎️ Telemetry Simulator</span>
+                    <button id="simPlayPauseBtn" class="btn-sm btn-accent">▶ Sweep Test</button>
+                </div>
+                <div class="sim-sliders-row">
+                    <div class="sim-field">
+                        <label>RPM <span id="valRpm">5400</span></label>
+                        <input type="range" id="simRpm" min="0" max="8000" value="5400">
+                    </div>
+                    <div class="sim-field">
+                        <label>Speed <span id="valSpeed">118</span> km/h</label>
+                        <input type="range" id="simSpeed" min="0" max="260" value="118">
+                    </div>
+                    <div class="sim-field">
+                        <label>Gear <span id="valGear">4</span></label>
+                        <input type="range" id="simGear" min="0" max="6" value="4">
+                    </div>
+                    <div class="sim-field">
+                        <label>Throttle <span id="valThrottle">82</span>%</label>
+                        <input type="range" id="simThrottle" min="0" max="100" value="82">
+                    </div>
+                    <div class="sim-field">
+                        <label>Brake <span id="valBrake">42</span>%</label>
+                        <input type="range" id="simBrake" min="0" max="100" value="42">
+                    </div>
+                    <div class="sim-field">
+                        <label>Fuel <span id="valFuel">75</span>%</label>
+                        <input type="range" id="simFuel" min="0" max="100" value="75">
+                    </div>
+                    <div class="sim-field">
+                        <label>Water Temp <span id="valWater">92</span>°C</label>
+                        <input type="range" id="simWater" min="40" max="130" value="92">
+                    </div>
+                </div>
+            </div>
+
+            <div class="hardware-bridge-panel">
+                <div class="bridge-header">
+                    <span class="bridge-title">🔌 Hardware Live Preview</span>
+                    <span id="bridgeStatusBadge" class="status-badge disconnected">Disconnected</span>
+                </div>
+                <div class="bridge-controls">
+                    <input type="text" id="bridgeTargetIp" class="styled-input" value="esp32-gauge-round.local" placeholder="Target Host / IP">
+                    <button id="connectWsBtn" class="btn-sm btn-primary">WebSocket Connect</button>
+                    <button id="connectSerialBtn" class="btn-sm btn-secondary">USB WebSerial</button>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- CODE EXPORT MODAL -->
+    <div id="codeModal" class="modal-backdrop">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>⚡ Generated C++ TFT_eSPI Firmware Code</h3>
+                <button id="closeModalBtn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Copy and paste this production double-buffered rendering code directly into your ESP32 display node firmware:</p>
+                <pre><code id="codeSnippet" class="code-block"></code></pre>
+            </div>
+            <div class="modal-footer">
+                <button id="copyCodeBtn" class="btn btn-primary">📋 Copy Code to Clipboard</button>
+                <button id="closeModalFooterBtn" class="btn btn-secondary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="code-generator.js"></script>
+    <script src="live-preview-bridge.js"></script>
+    <script src="builder.js"></script>
+</body>
+</html>

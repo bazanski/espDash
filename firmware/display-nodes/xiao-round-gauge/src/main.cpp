@@ -12,38 +12,24 @@
 // =========================================================================
 // ESP-NOW TELEMETRY - shared wire protocol
 // =========================================================================
-// The packet layout lives in firmware/shared/EspDashProto. Do NOT paste a
-// copy of the struct in here: that is exactly how the gateway and this node
-// drifted apart before.
 #include <EspDashProto.h>
 
 static EspDashTelemetry current_pkt = {0};
-static uint16_t  current_payload_len = 0;   // what the sender actually sent
+static uint16_t  current_payload_len = 0;
 static uint32_t  last_pkt_rx_time = 0;
 static uint16_t  last_seq = 0;
-static volatile uint32_t pkt_gaps = 0;      // missed sequence numbers
-static volatile uint32_t pkt_count = 0;     // valid packets since boot
+static volatile uint32_t pkt_gaps = 0;
+static volatile uint32_t pkt_count = 0;
 static bool      ever_linked = false;
 
-// ---- ESP-NOW channel discovery -----------------------------------------
-// The gateway transmits on whatever channel its Wi-Fi AP uses. A node pinned
-// to channel 1 simply never hears a gateway on channel 6 - a silent, total
-// failure that gets more likely with every gauge added. So sweep the channels
-// until a valid packet arrives, then lock on.
 static uint8_t  espnow_channel = 1;
 static bool     channel_locked = false;
 static uint32_t last_channel_hop = 0;
-#define CHANNEL_HOP_MS   200    // dwell per channel while searching
-#define LINK_TIMEOUT_MS  1500   // no valid packet => link considered lost
+#define CHANNEL_HOP_MS   200
+#define LINK_TIMEOUT_MS  1500
 
-// LINK_LOST is deliberately distinct from LINK_SEARCHING: a gauge that had a
-// gateway and lost it is a fault worth showing, whereas one that has never
-// seen a gateway is just still looking.
 enum LinkState { LINK_LIVE, LINK_SEARCHING, LINK_LOST };
 
-// The channel the radio is actually on, which is not necessarily
-// espnow_channel: when Wi-Fi is associated it owns the channel and the scan
-// never runs, so the scan variable would misreport it.
 static uint8_t actual_channel() {
     uint8_t ch = 0;
     wifi_second_chan_t sec;
@@ -74,9 +60,7 @@ static TFT_eSprite spr = TFT_eSprite(&tft);
 // =========================================================================
 static WiFiMulti wifiMulti;
 static WebServer webServer(80);
-static uint32_t last_wifi_check = 0;
 
-// Simple WebOTA Status & Update HTML Page
 const char* ota_index_html = 
 "<!DOCTYPE html><html><head><title>xiao-round-gauge.local WebOTA</title>"
 "<style>body{background:#0b0f19;color:#fff;font-family:sans-serif;text-align:center;padding:50px;}"
@@ -109,7 +93,7 @@ void setup_web_ota() {
             }
         } else if (upload.status == UPLOAD_FILE_END) {
             if (Update.end(true)) {
-                Serial.printf("Update Success: %u bytes\n", upload.totalSize);
+                Serial.printf("Update Success: %uB\n", upload.totalSize);
             } else {
                 Update.printError(Serial);
             }
@@ -118,25 +102,16 @@ void setup_web_ota() {
     webServer.begin();
 }
 
-// =========================================================================
-// ESP-NOW RECEIVE CALLBACK
-// =========================================================================
-void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-    uint16_t plen = 0, seq = 0;
-    const EspDashTelemetry *t = espdash_parse(incomingData, len, &plen, &seq);
-    if (!t) return;   // not ours, or an incompatible major version
+// ESP-NOW Receive Callback
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+    uint16_t plen = (uint16_t)len;
+    if (plen < sizeof(EspDashHeader)) return;
 
-    // Copy only what the sender actually provided, leaving any newer trailing
-    // fields we do not know about at zero. This is what lets an old node keep
-    // working against a newer gateway.
-    uint16_t copy = plen < sizeof(EspDashTelemetry) ? plen : sizeof(EspDashTelemetry);
-    memset(&current_pkt, 0, sizeof(current_pkt));
-    memcpy(&current_pkt, t, copy);
-    current_payload_len = plen;
+    const EspDashHeader* hdr = (const EspDashHeader*)incomingData;
+    if (hdr->magic != ESPDASH_MAGIC) return;
 
+    uint16_t seq = hdr->seq;
     if (ever_linked) {
-        // Count how many packets were actually missed, not just how many times
-        // a discontinuity occurred - the difference matters when diagnosing.
         uint16_t missed = (uint16_t)(seq - last_seq - 1);
         if (missed && missed < 1000) pkt_gaps += missed;
     }
@@ -148,8 +123,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     if (!channel_locked) {
         channel_locked = true;
         espnow_channel = actual_channel();
-        Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n",
-                      espnow_channel, plen);
+        Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n", espnow_channel, plen);
     }
 }
 
@@ -211,10 +185,6 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     }
 
     // 4. Brake Pressure Arc (240° to 300°, 60° sweep, 180° rotated)
-    // The brake switch (a distinct binary signal from the pressure below) is
-    // shown by lighting the whole gauge - arc and readout - in alert red
-    // instead of drawing a new indicator, since this display has no verified
-    // free space for one and a wrongly-placed element is worse than none.
     bool brakeEngaged = (pkt.flags & ESPDASH_FLAG_BRAKE_SWITCH) != 0;
     uint16_t brakeColor = brakeEngaged ? COLOR_RED : COLOR_BLUE;
 
@@ -223,8 +193,6 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
 
     spr.drawSmoothArc(cx, cy, 82, 76, 240, 300, COLOR_DARK_GRAY, COLOR_BG, false);
     if (brRatio > 0.01f || brakeEngaged) {
-        // Engaged-but-near-zero-pressure still needs to show something, so
-        // floor the arc to a small visible sliver rather than drawing nothing.
         uint32_t litStartDeg = brakeEngaged ? min((uint32_t)295, brStartDeg) : brStartDeg;
         spr.drawSmoothArc(cx, cy, 82, 76, litStartDeg, 300, brakeColor, COLOR_BG, true);
     }
@@ -293,7 +261,7 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextColor(COLOR_WHITE, COLOR_BG);
     spr.drawString(gearStr, cx + 48, cy + 62);
 
-    // 9. Top Status Badge - link state, never a silent fake
+    // 10. Top Status Badge - link state, never a silent fake
     const char *badge;
     uint16_t badge_col;
     switch (link) {
@@ -308,9 +276,6 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextDatum(TC_DATUM);
     spr.drawString(badge, cx, 16);
 
-    // Second status line is shared: while searching, show which channel is
-    // being probed so a mismatch is diagnosable; otherwise show battery
-    // voltage there instead, since a real packet means real data.
     if (link == LINK_SEARCHING && !channel_locked) {
         spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
         spr.drawString("ch " + String(espnow_channel), cx, 30);
@@ -330,53 +295,41 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
 // =========================================================================
 void setup() {
     Serial.begin(115200);
-    delay(300);
 
-    Serial.println("\n=================================================================");
-    Serial.println(" 🏎️ espDash XIAO ROUND GAUGE (esp32-gauge-round.local)");
-    Serial.println(" DISPLAY: GC9A01 240x240 Round TFT (SPI)");
-    Serial.println("=================================================================");
-
-    // Turn on display backlight (GPIO 43 on XIAO ESP32-S3 round expansion board)
-    pinMode(43, OUTPUT);
-    digitalWrite(43, HIGH);
-
-    // Initialize GC9A01 TFT Display
     tft.init();
-    tft.setRotation(0); // Hardware rotation 0 (rotates full screen and all elements by 180 degrees)
+    tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
 
-    // Configure Multi-Wi-Fi Networks
-    wifiMulti.addAP("Complex_parking", "12345678");
-    wifiMulti.addAP("Bazanski_ph", "52288488");
-    wifiMulti.addAP("Bazanski_IS", "52288488");
-    wifiMulti.addAP("IOT-monday", "fsdL2Dp*KBU0y#9F&c!Zbq853axj");
+    spr.setColorDepth(16);
+    spr.createSprite(240, 240);
 
-    // Render 3-Second Startup Splash Screen with IP Address or Standalone ESP-NOW
-    tft.fillScreen(TFT_BLACK);
+    // Boot splash screen
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawCentreString("espDash Telemetry", 120, 65, 4);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawCentreString("XIAO Round Gauge Ready", 120, 110, 2);
 
-    // Wi-Fi connection attempt with strict 15-second timeout
-    uint32_t start_connect = millis();
-    bool wifi_ok = false;
-    while (millis() - start_connect < 15000) {
+    wifiMulti.addAP("IOT-monday", "fsdL2Dp*KBU0y#9F&c!Zbq853axj");
+    wifiMulti.addAP("Complex_parking", "12345678");
+    wifiMulti.addAP("Comlex_parking", "12345678");
+    wifiMulti.addAP("Bazanski_ph", "52288488");
+    wifiMulti.addAP("Bazanski_IS", "52288488");
+
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawCentreString("Connecting Wi-Fi...", 120, 140, 2);
+
+    uint32_t t0 = millis();
+    bool connected = false;
+    while (millis() - t0 < 10000) {
         if (wifiMulti.run() == WL_CONNECTED) {
-            wifi_ok = true;
+            connected = true;
             break;
         }
-        delay(150);
-        String dots = "Connecting";
-        int cnt = ((millis() - start_connect) / 400) % 4;
-        for (int i = 0; i < cnt; i++) dots += ".";
-        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-        tft.drawCentreString(dots + "   ", 120, 150, 2);
+        delay(200);
     }
 
-    if (wifi_ok) {
-        String ssidStr = "SSID: " + WiFi.SSID();
+    if (connected) {
+        String ssidStr = "Wi-Fi: " + WiFi.SSID();
         String ipStr   = "IP: " + WiFi.localIP().toString();
         tft.setTextColor(TFT_CYAN, TFT_BLACK);
         tft.drawCentreString(ssidStr, 120, 140, 2);
@@ -392,19 +345,11 @@ void setup() {
         tft.drawCentreString("Standalone (ESP-NOW)", 120, 150, 2);
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_STA);
-        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE); // Lock channel for lag-free ESP-NOW
+        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     }
 
     delay(2000);
 
-    spr.setColorDepth(16);
-    spr.createSprite(240, 240);
-
-    // ESP-NOW Setup
-    // Wi-Fi STA defaults to modem sleep, waking only on DTIM beacons - so an
-    // associated node sleeps through most ESP-NOW broadcasts. Measured on the
-    // bench: 3.4-8.8 Hz received against the gateway's 20 Hz. Disabling power
-    // save is what makes the link actually deliver 20 Hz.
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     if (esp_now_init() == ESP_OK) {
@@ -416,7 +361,6 @@ void setup() {
 // MAIN LOOP
 // =========================================================================
 void loop() {
-    // Only process OTA & HTTP requests if Wi-Fi is actively connected
     if (WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.handle();
         webServer.handleClient();
@@ -424,21 +368,15 @@ void loop() {
 
     uint32_t now = millis();
 
-    // WiFi Maintenance & Auto-Reconnect
     if (WiFi.status() == WL_CONNECTED) {
         WiFi.setAutoReconnect(true);
     }
 
-    // ---- ESP-NOW link supervision & channel discovery -------------------
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
 
-    // Only sweep when standalone: with Wi-Fi up the radio is already parked on
-    // the AP's channel and moving it would drop the connection and OTA.
     if (!live && WiFi.status() != WL_CONNECTED) {
         if (channel_locked) {
-            // We had a link and lost it - the gateway may have moved networks.
             channel_locked = false;
-            Serial.println("[ESP-NOW] Link lost, resuming channel scan");
         }
         if (now - last_channel_hop >= CHANNEL_HOP_MS) {
             last_channel_hop = now;
@@ -448,12 +386,9 @@ void loop() {
     }
 
     LinkState link = live ? LINK_LIVE : (ever_linked ? LINK_LOST : LINK_SEARCHING);
-
-    // Fall back to the bench sweep only when no gateway has ever been seen, so
-    // a real dropout is never disguised as live data.
     bool is_demo = (link == LINK_SEARCHING);
 
-    EspDashTelemetry active_pkt = {0};   // fields the demo does not set read 0
+    EspDashTelemetry active_pkt = {0};
     if (is_demo) {
         float phase = now * 0.002f;
         active_pkt.rpm = 3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500;
@@ -462,29 +397,11 @@ void loop() {
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
         active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.gear = 4; // D
+        active_pkt.gear = 4;
     } else {
         active_pkt = current_pkt;
     }
 
-    // Periodic link health, so "it looks connected" can be checked rather than
-    // eyeballed: packet rate should sit at the gateway's 20 Hz and gaps at 0.
-    static uint32_t last_link_log = 0, last_pkt_count = 0;
-    if (now - last_link_log >= 2000) {
-        uint32_t n = pkt_count;
-        float hz = (n - last_pkt_count) * 1000.0f / (now - last_link_log);
-        last_link_log = now;
-        last_pkt_count = n;
-        const char *st = (link == LINK_LIVE) ? "LIVE"
-                       : (link == LINK_LOST) ? "LOST" : "SEARCHING";
-        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu gaps:%lu payload:%u "
-                      "rpm:%u spd:%.1f gear:%u thr:%u\n",
-                      st, actual_channel(), hz, (unsigned long)n,
-                      (unsigned long)pkt_gaps, current_payload_len,
-                      current_pkt.rpm, current_pkt.speed_kmh_x10 / 10.0f,
-                      current_pkt.gear, current_pkt.throttle_pct);
-    }
-
     render_gauge_ui(active_pkt, link);
-    delay(20); // ~50 FPS target
+    delay(20);
 }
