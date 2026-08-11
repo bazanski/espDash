@@ -618,7 +618,10 @@ void loop() {
         if (objects.gas_pedal_value) lv_label_set_text_fmt(objects.gas_pedal_value, "%d%%", active_pkt.throttle_pct);
         if (objects.brake_pressure_arc) lv_arc_set_value(objects.brake_pressure_arc, active_pkt.brake_pct);
         if (objects.brake_pressure_value) lv_label_set_text_fmt(objects.brake_pressure_value, "%d%%", active_pkt.brake_pct);
-        if (objects.battery_voltage_value) lv_label_set_text_fmt(objects.battery_voltage_value, "%.1fV", active_pkt.battery_mv / 1000.0f);
+        if (objects.battery_voltage_value) {
+            uint16_t mv = active_pkt.battery_mv;
+            lv_label_set_text_fmt(objects.battery_voltage_value, "%d.%dV", mv / 1000, (mv % 1000) / 100);
+        }
         if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
         if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
         if (objects.gear_value) lv_label_set_text(objects.gear_value, get_gear_str(active_pkt.gear));
