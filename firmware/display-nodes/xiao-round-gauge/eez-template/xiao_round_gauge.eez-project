@@ -1,0 +1,161 @@
+{
+  "version": "1.0.0",
+  "projectType": "lvgl",
+  "settings": {
+    "general": {
+      "name": "xiao_round_gauge",
+      "description": "espDash XIAO Round Universal Telemetry Gauge EEZ Studio Template",
+      "lvglVersion": "8.3",
+      "displayWidth": 240,
+      "displayHeight": 240,
+      "displayColorDepth": 16,
+      "targetPlatform": "ESP32-S3"
+    },
+    "build": {
+      "outputDirectory": "../src/ui",
+      "namingConvention": "snake_case",
+      "generateC": true
+    }
+  },
+  "styles": [
+    {
+      "name": "style_main",
+      "bg_color": "#0b0f19"
+    }
+  ],
+  "pages": [
+    {
+      "name": "main_screen",
+      "widgets": [
+        {
+          "type": "lv_obj",
+          "name": "ui_bg",
+          "x": 0,
+          "y": 0,
+          "w": 240,
+          "h": 240,
+          "style": { "bg_color": "#0b0f19" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_status_header",
+          "x": 60,
+          "y": 14,
+          "w": 120,
+          "h": 16,
+          "text": "ESP-NOW 20Hz",
+          "style": { "text_color": "#00f0ff" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_batt_voltage",
+          "x": 80,
+          "y": 28,
+          "w": 80,
+          "h": 14,
+          "text": "13.8V",
+          "style": { "text_color": "#8c8c8c" }
+        },
+        {
+          "type": "lv_arc",
+          "name": "ui_arc_rpm",
+          "x": 20,
+          "y": 20,
+          "w": 200,
+          "h": 200,
+          "start_angle": 135,
+          "end_angle": 45,
+          "range_min": 0,
+          "range_max": 8000,
+          "val": 3500
+        },
+        {
+          "type": "lv_arc",
+          "name": "ui_arc_throttle",
+          "x": 38,
+          "y": 38,
+          "w": 164,
+          "h": 164,
+          "start_angle": 150,
+          "end_angle": 210,
+          "range_min": 0,
+          "range_max": 100,
+          "val": 65
+        },
+        {
+          "type": "lv_arc",
+          "name": "ui_arc_brake",
+          "x": 38,
+          "y": 38,
+          "w": 164,
+          "h": 164,
+          "start_angle": 330,
+          "end_angle": 30,
+          "range_min": 0,
+          "range_max": 100,
+          "val": 0
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_label_speed_val",
+          "x": 50,
+          "y": 95,
+          "w": 140,
+          "h": 45,
+          "text": "115",
+          "style": { "text_color": "#ffffff" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_label_speed_unit",
+          "x": 90,
+          "y": 145,
+          "w": 60,
+          "h": 14,
+          "text": "KM/H",
+          "style": { "text_color": "#8c8c8c" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_label_steering",
+          "x": 90,
+          "y": 68,
+          "w": 60,
+          "h": 14,
+          "text": "0°",
+          "style": { "text_color": "#8c8c8c" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_label_temp",
+          "x": 45,
+          "y": 174,
+          "w": 50,
+          "h": 16,
+          "text": "92°C",
+          "style": { "text_color": "#ffff00" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_label_fuel",
+          "x": 95,
+          "y": 174,
+          "w": 50,
+          "h": 16,
+          "text": "F:75%",
+          "style": { "text_color": "#00ff00" }
+        },
+        {
+          "type": "lv_label",
+          "name": "ui_label_gear",
+          "x": 156,
+          "y": 172,
+          "w": 24,
+          "h": 16,
+          "text": "4",
+          "style": { "text_color": "#ffffff" }
+        }
+      ]
+    }
+  ]
+}

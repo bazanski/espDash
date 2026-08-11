@@ -4,6 +4,9 @@
 #include <esp_now.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
+#include <lvgl.h>
+#include "ui.h"
+#include "screens.h"
 
 #if ESPDASH_NODE_WIFI
 #include <ESPmDNS.h>
@@ -169,6 +172,23 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         espnow_channel = actual_channel();
         Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n",
                       espnow_channel, plen);
+    }
+}
+
+static const char* get_gear_str(uint8_t g) {
+    switch(g) {
+        case 0: return "P";
+        case 1: return "R";
+        case 2: return "N";
+        case 3: return "D";
+        case 4: return "S";
+        case 5: return "1";
+        case 6: return "2";
+        case 7: return "3";
+        case 8: return "4";
+        case 9: return "5";
+        case 10: return "6";
+        default: return "D";
     }
 }
 
@@ -347,6 +367,9 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
 // =========================================================================
 // SETUP
 // =========================================================================
+uint32_t g_telemetry_rpm = 0;
+uint32_t g_telemetry_throttle = 0;
+
 void setup() {
     Serial.begin(115200);
     delay(300);
@@ -442,16 +465,53 @@ void setup() {
     esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 #endif
 
-    delay(2000);
-
     spr.setColorDepth(16);
     spr.createSprite(240, 240);
 
+    // Initialize LVGL 8 & EEZ Studio UI (Screen 1)
+    lv_init();
+    static lv_color_t buf[240 * 10];
+    static lv_disp_draw_buf_t draw_buf;
+    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 240 * 10);
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = 240;
+    disp_drv.ver_res = 240;
+    disp_drv.flush_cb = [](lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+        uint32_t w = (area->x2 - area->x1 + 1);
+        uint32_t h = (area->y2 - area->y1 + 1);
+        tft.startWrite();
+        tft.setAddrWindow(area->x1, area->y1, w, h);
+        tft.pushColors((uint16_t *)&color_p->full, w * h, true);
+        tft.endWrite();
+        lv_disp_flush_ready(disp);
+    };
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+
+    ui_init();
+
+    // Ensure matching dark background (#0b0f19) & remove ugly widget boxes
+    if (objects.main) {
+        lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x0b0f19), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
+    }
+    lv_obj_t* widgets[] = {
+        objects.rpm_level_arc, objects.brake_pressure_arc, objects.gas_pedal_arc,
+        objects.speed_value, objects.speed_type_label, objects.gas_pedal_value,
+        objects.brake_pressure_value, objects.battery_voltage_value,
+        objects.coolant_temp_value, objects.fuel_level_value, objects.gear_value
+    };
+    for (int i = 0; i < 11; i++) {
+        if (widgets[i]) {
+            lv_obj_set_style_bg_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_outline_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_shadow_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+        }
+    }
+
     // ESP-NOW Setup
-    // Wi-Fi STA defaults to modem sleep, waking only on DTIM beacons - so an
-    // associated node sleeps through most ESP-NOW broadcasts. Measured on the
-    // bench: 3.4-8.8 Hz received against the gateway's 20 Hz. Disabling power
-    // save is what makes the link actually deliver 20 Hz.
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     if (esp_now_init() == ESP_OK) {
@@ -484,14 +544,8 @@ void loop() {
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
 
 #if ESPDASH_NODE_WIFI
-    // Only sweep when standalone: with Wi-Fi up the radio is already parked on
-    // the AP's channel and moving it would drop the connection and OTA. With
-    // ESPDASH_NODE_WIFI=0 this whole block is compiled out - the node is
-    // already fixed on ESPDASH_ESPNOW_CHANNEL from setup() and never needs to
-    // move, so there's nothing to sweep for.
     if (!live && WiFi.status() != WL_CONNECTED) {
         if (channel_locked) {
-            // We had a link and lost it - the gateway may have moved networks.
             channel_locked = false;
             Serial.println("[ESP-NOW] Link lost, resuming channel scan");
         }
@@ -504,27 +558,29 @@ void loop() {
 #endif
 
     LinkState link = live ? LINK_LIVE : (ever_linked ? LINK_LOST : LINK_SEARCHING);
-
-    // Fall back to the bench sweep only when no gateway has ever been seen, so
-    // a real dropout is never disguised as live data.
     bool is_demo = (link == LINK_SEARCHING);
 
-    EspDashTelemetry active_pkt = {0};   // fields the demo does not set read 0
+    EspDashTelemetry active_pkt = {0};
     if (is_demo) {
         float phase = now * 0.002f;
-        active_pkt.rpm = 3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500;
+        active_pkt.rpm = (uint16_t)(3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500);
         active_pkt.speed_kmh_x10 = (uint16_t)((90 + sin(phase * 0.8f) * 40) * 10);
         active_pkt.water_temp_x10 = (int16_t)((92 + sin(phase * 0.2f) * 6) * 10);
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
         active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.gear = 4; // D
+        active_pkt.fuel_pct = (uint8_t)(75 + sin(phase * 0.1f) * 20);
+        active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000); // Dynamic 11.2V - 14.8V sweep
+        active_pkt.gear = (uint8_t)(5 + ((int)(now * 0.0004f) % 6));
     } else {
         active_pkt = current_pkt;
     }
 
-    // Periodic link health, so "it looks connected" can be checked rather than
-    // eyeballed: packet rate should sit at the gateway's 20 Hz and gaps at 0.
+    // Keep global telemetry variables synced for EEZ Studio tick functions
+    g_telemetry_rpm = active_pkt.rpm;
+    g_telemetry_throttle = active_pkt.throttle_pct;
+
+    // Periodic link health logger
     static uint32_t last_link_log = 0, last_pkt_count = 0;
     if (now - last_link_log >= 2000) {
         uint32_t n = pkt_count;
@@ -541,6 +597,37 @@ void loop() {
                       current_pkt.gear, current_pkt.throttle_pct);
     }
 
-    render_gauge_ui(active_pkt, link);
+    // ---- Dual Screen 10-Second Auto Carousel ----
+    static uint32_t last_carousel_switch = 0;
+    static uint8_t active_screen = 1; // 1 = EEZ Studio UI, 2 = Production UI
+
+    if (now - last_carousel_switch >= 10000) {
+        last_carousel_switch = now;
+        active_screen = (active_screen == 1) ? 2 : 1;
+        Serial.printf("[CAROUSEL] Switched to Screen %d (%s)\n",
+                      active_screen, (active_screen == 1) ? "EEZ Studio UI" : "Production UI");
+    }
+
+    if (active_screen == 1) {
+        ui_tick();
+
+        // Screen 1: Update EEZ Studio LVGL Widgets with 20Hz Telemetry & Demo Sweep
+        if (objects.rpm_level_arc) lv_arc_set_value(objects.rpm_level_arc, active_pkt.rpm);
+        if (objects.speed_value) lv_label_set_text_fmt(objects.speed_value, "%d", active_pkt.speed_kmh_x10 / 10);
+        if (objects.gas_pedal_arc) lv_arc_set_value(objects.gas_pedal_arc, active_pkt.throttle_pct);
+        if (objects.gas_pedal_value) lv_label_set_text_fmt(objects.gas_pedal_value, "%d%%", active_pkt.throttle_pct);
+        if (objects.brake_pressure_arc) lv_arc_set_value(objects.brake_pressure_arc, active_pkt.brake_pct);
+        if (objects.brake_pressure_value) lv_label_set_text_fmt(objects.brake_pressure_value, "%d%%", active_pkt.brake_pct);
+        if (objects.battery_voltage_value) lv_label_set_text_fmt(objects.battery_voltage_value, "%.1fV", active_pkt.battery_mv / 1000.0f);
+        if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
+        if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
+        if (objects.gear_value) lv_label_set_text(objects.gear_value, get_gear_str(active_pkt.gear));
+
+        lv_timer_handler();
+    } else {
+        // Screen 2: Current Production UI (render_gauge_ui - 100% unchanged)
+        render_gauge_ui(active_pkt, link);
+    }
+
     delay(20); // ~50 FPS target
 }
