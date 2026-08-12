@@ -90,7 +90,7 @@ void setup() {
             lv_chart_set_type(objects.history_chart, LV_CHART_TYPE_LINE);
             lv_chart_set_update_mode(objects.history_chart, LV_CHART_UPDATE_MODE_SHIFT);
             lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-            lv_chart_set_point_count(objects.history_chart, 100); // 100 samples @ 10Hz = 10 sec rolling window
+            lv_chart_set_point_count(objects.history_chart, 200); // 200 samples @ 20Hz = 10 sec rolling window
 
             // Remove default circular points on line nodes for a sleek Racelab look
             lv_obj_set_style_size(objects.history_chart, 0, LV_PART_INDICATOR);
@@ -103,7 +103,7 @@ void setup() {
             ser_brake    = lv_chart_add_series(objects.history_chart, lv_color_hex(0xFF0000), LV_CHART_AXIS_PRIMARY_Y); // Bright Red
 
             // Pre-fill chart with zero values
-            for (int i = 0; i < 100; i++) {
+            for (int i = 0; i < 200; i++) {
                 lv_chart_set_next_value(objects.history_chart, ser_throttle, 0);
                 lv_chart_set_next_value(objects.history_chart, ser_brake, 0);
             }
@@ -143,11 +143,15 @@ void loop() {
 
     EspDashTelemetry active_pkt = {0};
     if (is_demo) {
-        float phase = now * 0.002f;
-        active_pkt.rpm = (uint16_t)(3500 + sin(phase) * 3200);
-        active_pkt.speed_kmh_x10 = (uint16_t)((110 + sin(phase * 0.8f) * 50) * 10);
-        active_pkt.throttle_pct = (uint8_t)(max(0.0f, sin(phase * 1.5f) * 100.0f));
-        active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 90.0f));
+        // Dynamic multi-frequency sinusoidal telemetry sweep curves
+        float phase = now * 0.0015f;
+        float thr_val = 50.0f + 42.0f * sin(phase * 1.3f) + 14.0f * sin(phase * 2.9f);
+        float brk_val = 45.0f + 42.0f * sin(phase * 1.3f + 2.4f) + 12.0f * cos(phase * 3.3f);
+
+        active_pkt.throttle_pct = (uint8_t)constrain((int)thr_val, 0, 100);
+        active_pkt.brake_pct    = (uint8_t)constrain((int)brk_val, 0, 100);
+        active_pkt.rpm          = (uint16_t)constrain((int)(1200 + (active_pkt.throttle_pct / 100.0f) * 5200 + sin(phase * 4.2f) * 350), 800, 7000);
+        active_pkt.speed_kmh_x10 = (uint16_t)((75 + (active_pkt.throttle_pct / 100.0f) * 85) * 10);
         active_pkt.water_temp_x10 = 920;
         active_pkt.fuel_pct = 82;
         active_pkt.battery_mv = 13800;
@@ -158,13 +162,14 @@ void loop() {
 
     // Thread-safe update of UI elements (FreeRTOS mutex guard)
     if (lvgl_port_lock(20)) {
-        // 10 Hz (100ms) Chart Feed for 10-Second Rolling Window
+        // 20 Hz (50ms) Chart Feed for 10-Second Rolling Window
         static uint32_t last_chart_update = 0;
-        if (now - last_chart_update >= 100) {
+        if (now - last_chart_update >= 50) {
             last_chart_update = now;
             if (objects.history_chart && ser_throttle && ser_brake) {
                 lv_chart_set_next_value(objects.history_chart, ser_throttle, active_pkt.throttle_pct);
                 lv_chart_set_next_value(objects.history_chart, ser_brake, active_pkt.brake_pct);
+                lv_chart_refresh(objects.history_chart);
             }
         }
 
@@ -177,5 +182,5 @@ void loop() {
         lvgl_port_unlock();
     }
 
-    delay(20); // ~50 FPS target
+    delay(10); // ~100 FPS target
 }

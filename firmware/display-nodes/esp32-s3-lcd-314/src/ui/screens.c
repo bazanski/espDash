@@ -69,7 +69,7 @@ void create_screen_main() {
             lv_obj_t *obj = lv_chart_create(parent_obj);
             objects.history_chart = obj;
             lv_obj_set_pos(obj, 109, 32);
-            lv_obj_set_size(obj, 681, 257);
+            lv_obj_set_size(obj, 634, 257);
         }
         {
             // throttle_bar
