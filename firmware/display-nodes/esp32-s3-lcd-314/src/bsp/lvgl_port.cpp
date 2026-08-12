@@ -99,7 +99,7 @@ static esp_lcd_panel_handle_t rgb_port_init(void)
   esp_lcd_rgb_panel_config_t rgb_config = {};
   rgb_config.clk_src = LCD_CLK_SRC_PLL160M;
   rgb_config.psram_trans_align = 64;
-  // rgb_config.bounce_buffer_size_px = 10 * EXAMPLE_LCD_H_RES;
+  // rgb_config.bounce_buffer_size_px = 10 * EXAMPLE_LCD_H_RES; // Not available in this ESP-IDF version
   // rgb_config.num_fbs = 2;
   rgb_config.data_width = 16;
   // rgb_config.bits_per_pixel = 16;

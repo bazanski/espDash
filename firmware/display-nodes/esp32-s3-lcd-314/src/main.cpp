@@ -160,27 +160,41 @@ void loop() {
         active_pkt = current_pkt;
     }
 
-    // Thread-safe update of UI elements (FreeRTOS mutex guard)
-    if (lvgl_port_lock(20)) {
-        // 20 Hz (50ms) Chart Feed for 10-Second Rolling Window
-        static uint32_t last_chart_update = 0;
-        if (now - last_chart_update >= 50) {
-            last_chart_update = now;
+    // Batch all LVGL updates at 20 Hz (50ms) to avoid excessive mutex contention
+    // and partial-frame redraws that cause visible twitching
+    static uint32_t last_ui_update = 0;
+    static uint8_t prev_throttle = 0xFF, prev_brake = 0xFF;
+    static uint16_t prev_rpm = 0xFFFF;
+
+    if (now - last_ui_update >= 50) {
+        last_ui_update = now;
+
+        if (lvgl_port_lock(10)) {
+            // Chart feed (lv_chart_set_next_value auto-invalidates; no lv_chart_refresh needed)
             if (objects.history_chart && ser_throttle && ser_brake) {
                 lv_chart_set_next_value(objects.history_chart, ser_throttle, active_pkt.throttle_pct);
                 lv_chart_set_next_value(objects.history_chart, ser_brake, active_pkt.brake_pct);
-                lv_chart_refresh(objects.history_chart);
             }
+
+            // Only update bars when value actually changed (avoids needless redraws)
+            if (objects.throttle_bar && active_pkt.throttle_pct != prev_throttle) {
+                lv_bar_set_value(objects.throttle_bar, active_pkt.throttle_pct, LV_ANIM_OFF);
+                prev_throttle = active_pkt.throttle_pct;
+            }
+            if (objects.brake_bar && active_pkt.brake_pct != prev_brake) {
+                lv_bar_set_value(objects.brake_bar, active_pkt.brake_pct, LV_ANIM_OFF);
+                prev_brake = active_pkt.brake_pct;
+            }
+            uint16_t rpm_clamped = min((uint16_t)7000, active_pkt.rpm);
+            if (objects.rpm_bar && rpm_clamped != prev_rpm) {
+                lv_bar_set_value(objects.rpm_bar, rpm_clamped, LV_ANIM_OFF);
+                prev_rpm = rpm_clamped;
+            }
+
+            ui_tick();
+            lvgl_port_unlock();
         }
-
-        // Update Telemetry Bars (0-100% Throttle, 0-100% Brake, 0-7000 RPM)
-        if (objects.throttle_bar) lv_bar_set_value(objects.throttle_bar, active_pkt.throttle_pct, LV_ANIM_OFF);
-        if (objects.brake_bar) lv_bar_set_value(objects.brake_bar, active_pkt.brake_pct, LV_ANIM_OFF);
-        if (objects.rpm_bar) lv_bar_set_value(objects.rpm_bar, min((uint16_t)7000, active_pkt.rpm), LV_ANIM_OFF);
-
-        ui_tick();
-        lvgl_port_unlock();
     }
 
-    delay(10); // ~100 FPS target
+    delay(20); // Let LVGL task run uncontested between updates
 }
