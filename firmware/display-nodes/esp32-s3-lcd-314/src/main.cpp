@@ -1,10 +1,11 @@
 #include <Arduino.h>
-#include <SPI.h>
-#include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
-#include <lvgl/lvgl.h>
+#include "lvgl.h"
+#include "bsp/lvgl_port.h"
+#include "bsp/lcd_bl_pwm_bsp.h"
+#include "bsp/user_config.h"
 #include "EspDashProto.h"
 
 #include "ui/ui.h"
@@ -12,8 +13,8 @@
 
 #define LINK_TIMEOUT_MS 1500
 
-// TFT_eSPI Display Driver Instance
-TFT_eSPI tft = TFT_eSPI();
+// External function defined in ST7701 display driver
+extern "C" void release_st7701_spi_pins(void);
 
 // ESP-NOW State Supervision
 static uint32_t last_pkt_rx_time = 0;
@@ -56,98 +57,73 @@ void setup() {
     delay(300);
 
     Serial.println("\n=================================================================");
-    Serial.println(" 🏎️ espDash ESP32-S3-LCD-3.14 (Racelab Telemetry Display)");
-    Serial.println(" DISPLAY: ST7796 / ST7789 SPI LCD (Landscape)");
+    Serial.println(" 🏎️ espDash Waveshare ESP32-S3-LCD-3.16 (Racelab Telemetry Display)");
+    Serial.println(" DISPLAY: ST7701 RGB Parallel 820x320 LCD (Landscape)");
     Serial.println("=================================================================");
 
-    // Backlight Control (GPIO 13 or 45 depending on board rev)
-    pinMode(13, OUTPUT);
-    digitalWrite(13, HIGH);
+    // Initialize ST7701 RGB parallel display driver & FreeRTOS LVGL task
+    lvgl_port_init();
 
-    // Initialize SPI Display in Landscape Mode (Rotation 1)
-    tft.init();
-    tft.setRotation(1); // Landscape mode
-    tft.fillScreen(TFT_BLACK);
+    // Turn on LCD backlight to full brightness
+    lcd_bl_pwm_bsp_init(LCD_PWM_MODE_255);
 
-    // Startup Splash
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawCentreString("espDash Telemetry", tft.width() / 2, tft.height() / 2 - 30, 4);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawCentreString("ESP32-S3-LCD-3.14 Ready", tft.width() / 2, tft.height() / 2 + 10, 2);
-    delay(1000);
+    // Release 3-wire SPI pins after panel initialization
+    release_st7701_spi_pins();
 
     // Setup WiFi Radio for ESP-NOW (No WiFi association overhead)
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_STA);
     esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-    // Initialize LVGL 8
-    lv_init();
-    static lv_color_t buf[480 * 10];
-    static lv_disp_draw_buf_t draw_buf;
-    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 480 * 10);
+    // Lock LVGL mutex to build EEZ Studio UI & configure chart
+    if (lvgl_port_lock(500)) {
+        ui_init();
 
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = 480;
-    disp_drv.ver_res = 320;
-    disp_drv.flush_cb = [](lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-        uint32_t w = (area->x2 - area->x1 + 1);
-        uint32_t h = (area->y2 - area->y1 + 1);
-        tft.startWrite();
-        tft.setAddrWindow(area->x1, area->y1, w, h);
-        tft.pushColors((uint16_t *)&color_p->full, w * h, true);
-        tft.endWrite();
-        lv_disp_flush_ready(disp);
-    };
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
-
-    // Initialize EEZ Studio UI Layout
-    ui_init();
-
-    // Set dark background matching Racelab telemetry aesthetic
-    if (objects.main) {
-        lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x0f111a), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
-    }
-
-    // Configure Racelab-Style 10-Second Rolling Telemetry Chart
-    if (objects.history_chart) {
-        lv_chart_set_type(objects.history_chart, LV_CHART_TYPE_LINE);
-        lv_chart_set_update_mode(objects.history_chart, LV_CHART_UPDATE_MODE_SHIFT);
-        lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-        lv_chart_set_point_count(objects.history_chart, 100); // 100 samples @ 10Hz = 10 sec rolling window
-
-        // Remove default circular points on line nodes for a sleek Racelab look
-        lv_obj_set_style_size(objects.history_chart, 0, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(objects.history_chart, lv_color_hex(0x141824), LV_PART_MAIN);
-        lv_obj_set_style_border_color(objects.history_chart, lv_color_hex(0x2a2f45), LV_PART_MAIN);
-        lv_obj_set_style_line_width(objects.history_chart, 2, LV_PART_ITEMS);
-
-        // Add 2 Time-Synchronized Series
-        ser_throttle = lv_chart_add_series(objects.history_chart, lv_color_hex(0x00FF00), LV_CHART_AXIS_PRIMARY_Y); // Neon Green
-        ser_brake    = lv_chart_add_series(objects.history_chart, lv_color_hex(0xFF0000), LV_CHART_AXIS_PRIMARY_Y); // Bright Red
-
-        // Pre-fill chart with zero values
-        for (int i = 0; i < 100; i++) {
-            lv_chart_set_next_value(objects.history_chart, ser_throttle, 0);
-            lv_chart_set_next_value(objects.history_chart, ser_brake, 0);
+        // Set dark background matching Racelab telemetry aesthetic
+        if (objects.main) {
+            lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x0f111a), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
         }
-    }
 
-    // Configure Bar Ranges & Initial Values
-    if (objects.throttle_bar) {
-        lv_bar_set_range(objects.throttle_bar, 0, 100);
-        lv_obj_set_style_bg_color(objects.throttle_bar, lv_color_hex(0x00FF00), LV_PART_INDICATOR);
-    }
-    if (objects.brake_bar) {
-        lv_bar_set_range(objects.brake_bar, 0, 100);
-        lv_obj_set_style_bg_color(objects.brake_bar, lv_color_hex(0xFF0000), LV_PART_INDICATOR);
-    }
-    if (objects.rpm_bar) {
-        lv_bar_set_range(objects.rpm_bar, 0, 7000);
-        lv_obj_set_style_bg_color(objects.rpm_bar, lv_color_hex(0x00BFFF), LV_PART_INDICATOR);
+        // Configure Racelab-Style 10-Second Rolling Telemetry Chart
+        if (objects.history_chart) {
+            lv_chart_set_type(objects.history_chart, LV_CHART_TYPE_LINE);
+            lv_chart_set_update_mode(objects.history_chart, LV_CHART_UPDATE_MODE_SHIFT);
+            lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+            lv_chart_set_point_count(objects.history_chart, 100); // 100 samples @ 10Hz = 10 sec rolling window
+
+            // Remove default circular points on line nodes for a sleek Racelab look
+            lv_obj_set_style_size(objects.history_chart, 0, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(objects.history_chart, lv_color_hex(0x141824), LV_PART_MAIN);
+            lv_obj_set_style_border_color(objects.history_chart, lv_color_hex(0x2a2f45), LV_PART_MAIN);
+            lv_obj_set_style_line_width(objects.history_chart, 2, LV_PART_ITEMS);
+
+            // Add 2 Time-Synchronized Series
+            ser_throttle = lv_chart_add_series(objects.history_chart, lv_color_hex(0x00FF00), LV_CHART_AXIS_PRIMARY_Y); // Neon Green
+            ser_brake    = lv_chart_add_series(objects.history_chart, lv_color_hex(0xFF0000), LV_CHART_AXIS_PRIMARY_Y); // Bright Red
+
+            // Pre-fill chart with zero values
+            for (int i = 0; i < 100; i++) {
+                lv_chart_set_next_value(objects.history_chart, ser_throttle, 0);
+                lv_chart_set_next_value(objects.history_chart, ser_brake, 0);
+            }
+        }
+
+        // Configure Bar Ranges & Colors
+        if (objects.throttle_bar) {
+            lv_bar_set_range(objects.throttle_bar, 0, 100);
+            lv_obj_set_style_bg_color(objects.throttle_bar, lv_color_hex(0x00FF00), LV_PART_INDICATOR);
+        }
+        if (objects.brake_bar) {
+            lv_bar_set_range(objects.brake_bar, 0, 100);
+            lv_obj_set_style_bg_color(objects.brake_bar, lv_color_hex(0xFF0000), LV_PART_INDICATOR);
+        }
+        if (objects.rpm_bar) {
+            lv_bar_set_range(objects.rpm_bar, 0, 7000);
+            lv_obj_set_style_bg_color(objects.rpm_bar, lv_color_hex(0x00BFFF), LV_PART_INDICATOR);
+        }
+
+        lvgl_port_unlock();
     }
 
     // Register ESP-NOW Receiver Callback
@@ -180,23 +156,26 @@ void loop() {
         active_pkt = current_pkt;
     }
 
-    // 10 Hz (100ms) Chart Feed for 10-Second Rolling Window
-    static uint32_t last_chart_update = 0;
-    if (now - last_chart_update >= 100) {
-        last_chart_update = now;
-        if (objects.history_chart && ser_throttle && ser_brake) {
-            lv_chart_set_next_value(objects.history_chart, ser_throttle, active_pkt.throttle_pct);
-            lv_chart_set_next_value(objects.history_chart, ser_brake, active_pkt.brake_pct);
+    // Thread-safe update of UI elements (FreeRTOS mutex guard)
+    if (lvgl_port_lock(20)) {
+        // 10 Hz (100ms) Chart Feed for 10-Second Rolling Window
+        static uint32_t last_chart_update = 0;
+        if (now - last_chart_update >= 100) {
+            last_chart_update = now;
+            if (objects.history_chart && ser_throttle && ser_brake) {
+                lv_chart_set_next_value(objects.history_chart, ser_throttle, active_pkt.throttle_pct);
+                lv_chart_set_next_value(objects.history_chart, ser_brake, active_pkt.brake_pct);
+            }
         }
+
+        // Update Telemetry Bars (0-100% Throttle, 0-100% Brake, 0-7000 RPM)
+        if (objects.throttle_bar) lv_bar_set_value(objects.throttle_bar, active_pkt.throttle_pct, LV_ANIM_OFF);
+        if (objects.brake_bar) lv_bar_set_value(objects.brake_bar, active_pkt.brake_pct, LV_ANIM_OFF);
+        if (objects.rpm_bar) lv_bar_set_value(objects.rpm_bar, min((uint16_t)7000, active_pkt.rpm), LV_ANIM_OFF);
+
+        ui_tick();
+        lvgl_port_unlock();
     }
-
-    // Update Telemetry Bars (0-100% Throttle, 0-100% Brake, 0-7000 RPM)
-    if (objects.throttle_bar) lv_bar_set_value(objects.throttle_bar, active_pkt.throttle_pct, LV_ANIM_OFF);
-    if (objects.brake_bar) lv_bar_set_value(objects.brake_bar, active_pkt.brake_pct, LV_ANIM_OFF);
-    if (objects.rpm_bar) lv_bar_set_value(objects.rpm_bar, min((uint16_t)7000, active_pkt.rpm), LV_ANIM_OFF);
-
-    ui_tick();
-    lv_timer_handler();
 
     delay(20); // ~50 FPS target
 }
