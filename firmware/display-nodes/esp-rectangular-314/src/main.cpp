@@ -172,20 +172,37 @@ void loop() {
     static uint8_t prev_throttle = 0xFF, prev_brake = 0xFF;
     static uint16_t prev_rpm = 0xFFFF;
 
+#define SPEED_WINDOW_POINTS 200
+static uint16_t speed_history_buf[SPEED_WINDOW_POINTS] = {0};
+static uint16_t speed_buf_idx = 0;
+
     if (now - last_ui_update >= 50) {
         last_ui_update = now;
 
         if (lvgl_port_lock(10)) {
-            // Chart feed with dynamic speed autoscale (default 60 km/h, expands up if speed > 60 km/h)
+            // Chart feed with dynamic speed autoscale (visible 10s window max + 10 km/h padding, baseline 60 km/h)
             if (objects.history_chart && ser_throttle && ser_brake && ser_speed) {
                 uint16_t spd_kmh = active_pkt.speed_kmh_x10 / 10;
-                uint16_t target_ymax = max((uint16_t)60, spd_kmh);
 
-                if (target_ymax > current_speed_ymax) {
+                // Store in circular buffer matching the 200 visible chart points (10 sec)
+                speed_history_buf[speed_buf_idx] = spd_kmh;
+                speed_buf_idx = (speed_buf_idx + 1) % SPEED_WINDOW_POINTS;
+
+                // Find peak speed within currently visible 10-second chart window
+                uint16_t visible_max_speed = 0;
+                for (int i = 0; i < SPEED_WINDOW_POINTS; i++) {
+                    if (speed_history_buf[i] > visible_max_speed) {
+                        visible_max_speed = speed_history_buf[i];
+                    }
+                }
+
+                // Baseline Y-max is 60 km/h. When speed exceeds 50 km/h, scale to (visible_max + 10 km/h)
+                // so the yellow speed line never touches the top border of the chart.
+                // Reverts back to 60 km/h automatically once high speed points roll off the screen.
+                uint16_t target_ymax = (visible_max_speed > 50) ? (visible_max_speed + 10) : 60;
+
+                if (target_ymax != current_speed_ymax) {
                     current_speed_ymax = target_ymax;
-                    lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, current_speed_ymax);
-                } else if (target_ymax < current_speed_ymax && current_speed_ymax > 60) {
-                    current_speed_ymax = max((uint16_t)60, (uint16_t)(current_speed_ymax - 1));
                     lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, current_speed_ymax);
                 }
 
