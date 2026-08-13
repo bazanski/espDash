@@ -51,6 +51,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 // Global LVGL Chart Series Handles
 static lv_chart_series_t *ser_throttle = NULL;
 static lv_chart_series_t *ser_brake    = NULL;
+static lv_chart_series_t *ser_speed    = NULL;
+static uint16_t current_speed_ymax     = 60;
 
 void setup() {
     Serial.begin(115200);
@@ -59,6 +61,7 @@ void setup() {
     Serial.println("\n=================================================================");
     Serial.println(" 🏎️ espDash Waveshare ESP32-S3-LCD-3.16 (Racelab Telemetry Display)");
     Serial.println(" DISPLAY: ST7701 RGB Parallel 820x320 LCD (Landscape)");
+    Serial.println(" NODE: esp-rectangular-314");
     Serial.println("=================================================================");
 
     // Initialize ST7701 RGB parallel display driver & FreeRTOS LVGL task
@@ -90,6 +93,7 @@ void setup() {
             lv_chart_set_type(objects.history_chart, LV_CHART_TYPE_LINE);
             lv_chart_set_update_mode(objects.history_chart, LV_CHART_UPDATE_MODE_SHIFT);
             lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+            lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 60);
             lv_chart_set_point_count(objects.history_chart, 200); // 200 samples @ 20Hz = 10 sec rolling window
 
             // Remove default circular points on line nodes for a sleek Racelab look
@@ -98,14 +102,16 @@ void setup() {
             lv_obj_set_style_border_color(objects.history_chart, lv_color_hex(0x2a2f45), LV_PART_MAIN);
             lv_obj_set_style_line_width(objects.history_chart, 2, LV_PART_ITEMS);
 
-            // Add 2 Time-Synchronized Series
-            ser_throttle = lv_chart_add_series(objects.history_chart, lv_color_hex(0x00FF00), LV_CHART_AXIS_PRIMARY_Y); // Neon Green
-            ser_brake    = lv_chart_add_series(objects.history_chart, lv_color_hex(0xFF0000), LV_CHART_AXIS_PRIMARY_Y); // Bright Red
+            // Add 3 Time-Synchronized Series
+            ser_throttle = lv_chart_add_series(objects.history_chart, lv_color_hex(0x00FF00), LV_CHART_AXIS_PRIMARY_Y);   // Neon Green (Throttle %)
+            ser_brake    = lv_chart_add_series(objects.history_chart, lv_color_hex(0xFF0000), LV_CHART_AXIS_PRIMARY_Y);   // Bright Red (Brake %)
+            ser_speed    = lv_chart_add_series(objects.history_chart, lv_color_hex(0xFFFF00), LV_CHART_AXIS_SECONDARY_Y); // Bright Yellow (Speed KM/H)
 
             // Pre-fill chart with zero values
             for (int i = 0; i < 200; i++) {
                 lv_chart_set_next_value(objects.history_chart, ser_throttle, 0);
                 lv_chart_set_next_value(objects.history_chart, ser_brake, 0);
+                lv_chart_set_next_value(objects.history_chart, ser_speed, 0);
             }
         }
 
@@ -151,7 +157,7 @@ void loop() {
         active_pkt.throttle_pct = (uint8_t)constrain((int)thr_val, 0, 100);
         active_pkt.brake_pct    = (uint8_t)constrain((int)brk_val, 0, 100);
         active_pkt.rpm          = (uint16_t)constrain((int)(1200 + (active_pkt.throttle_pct / 100.0f) * 5200 + sin(phase * 4.2f) * 350), 800, 7000);
-        active_pkt.speed_kmh_x10 = (uint16_t)((75 + (active_pkt.throttle_pct / 100.0f) * 85) * 10);
+        active_pkt.speed_kmh_x10 = (uint16_t)((35 + (active_pkt.throttle_pct / 100.0f) * 65 + sin(phase * 0.8f) * 20) * 10); // 15 - 120 km/h sweep
         active_pkt.water_temp_x10 = 920;
         active_pkt.fuel_pct = 82;
         active_pkt.battery_mv = 13800;
@@ -170,10 +176,22 @@ void loop() {
         last_ui_update = now;
 
         if (lvgl_port_lock(10)) {
-            // Chart feed (lv_chart_set_next_value auto-invalidates; no lv_chart_refresh needed)
-            if (objects.history_chart && ser_throttle && ser_brake) {
+            // Chart feed with dynamic speed autoscale (default 60 km/h, expands up if speed > 60 km/h)
+            if (objects.history_chart && ser_throttle && ser_brake && ser_speed) {
+                uint16_t spd_kmh = active_pkt.speed_kmh_x10 / 10;
+                uint16_t target_ymax = max((uint16_t)60, spd_kmh);
+
+                if (target_ymax > current_speed_ymax) {
+                    current_speed_ymax = target_ymax;
+                    lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, current_speed_ymax);
+                } else if (target_ymax < current_speed_ymax && current_speed_ymax > 60) {
+                    current_speed_ymax = max((uint16_t)60, (uint16_t)(current_speed_ymax - 1));
+                    lv_chart_set_range(objects.history_chart, LV_CHART_AXIS_SECONDARY_Y, 0, current_speed_ymax);
+                }
+
                 lv_chart_set_next_value(objects.history_chart, ser_throttle, active_pkt.throttle_pct);
                 lv_chart_set_next_value(objects.history_chart, ser_brake, active_pkt.brake_pct);
+                lv_chart_set_next_value(objects.history_chart, ser_speed, spd_kmh);
             }
 
             // Only update bars when value actually changed (avoids needless redraws)
