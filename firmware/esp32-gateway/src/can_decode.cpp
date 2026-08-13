@@ -79,9 +79,9 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
     const uint8_t *d = f->data;
     const uint8_t dlc = f->dlc;
 
-    // Every ID this function decodes carries the Honda checksum, so a failure
-    // means corruption. Reject rather than let it reach a gauge.
-    if (!honda_checksum_valid(f->id, d, dlc)) {
+    // 8-byte Honda CAN frames carry a 4-bit counter+checksum in the last byte.
+    // Short frames (DLC < 8) carry pure data without a checksum nibble.
+    if (dlc >= 8 && !honda_checksum_valid(f->id, d, dlc)) {
         st->checksum_rejects++;
         return false;
     }
@@ -239,7 +239,7 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
     // 0x305 byte 0 - 12V battery, 100 mV per count. Dash-verified at 14.2 V.
     case 0x305:
         if (dlc >= 1) {
-            if (d[0] >= 100 && d[0] <= 160) {
+            if (d[0] >= 50 && d[0] <= 200) {
                 st->battery_mv = (uint16_t)(d[0] * 100);
                 touch(st, SIG_BATTERY, now_ms);
             }

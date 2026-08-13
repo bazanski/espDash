@@ -604,6 +604,11 @@ void loop() {
     if (now - last_carousel_switch >= 10000) {
         last_carousel_switch = now;
         active_screen = (active_screen == 1) ? 2 : 1;
+        if (active_screen == 1) {
+            // Wipes screen 2 graphics from TFT framebuffer and forces LVGL to re-render screen 1 completely
+            tft.fillScreen(COLOR_BG);
+            if (lv_scr_act()) lv_obj_invalidate(lv_scr_act());
+        }
         Serial.printf("[CAROUSEL] Switched to Screen %d (%s)\n",
                       active_screen, (active_screen == 1) ? "EEZ Studio UI" : "Production UI");
     }
@@ -620,7 +625,11 @@ void loop() {
         if (objects.brake_pressure_value) lv_label_set_text_fmt(objects.brake_pressure_value, "%d%%", active_pkt.brake_pct);
         if (objects.battery_voltage_value) {
             uint16_t mv = active_pkt.battery_mv;
-            lv_label_set_text_fmt(objects.battery_voltage_value, "%d.%dV", mv / 1000, (mv % 1000) / 100);
+            if (mv > 0) {
+                lv_label_set_text_fmt(objects.battery_voltage_value, "%d.%dV", mv / 1000, (mv % 1000) / 100);
+            } else {
+                lv_label_set_text(objects.battery_voltage_value, "--.-V");
+            }
         }
         if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
         if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
