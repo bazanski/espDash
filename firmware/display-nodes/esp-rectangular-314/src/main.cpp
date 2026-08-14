@@ -223,10 +223,22 @@ static void rec_label_update(void) {
             colour = 0xff4040;
             // File number is shown throughout so a recording can be tied back
             // to what you were doing at the time.
-            snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %luMB",
-                     (unsigned)canlog_file_index(),
-                     (unsigned long)(sec / 60), (unsigned long)(sec % 60),
-                     (unsigned long)(canlog_bytes_written() / (1024 * 1024)));
+            // KB below 1 MB: at ~14.5 KB/s a capture takes over a minute to
+            // reach 1 MB, so a plain MB figure sits at "0MB" for the whole of
+            // a short recording and reads as "nothing is being written".
+            uint32_t wr = canlog_bytes_written();
+            if (wr < 1024UL * 1024UL) {
+                snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %luKB",
+                         (unsigned)canlog_file_index(),
+                         (unsigned long)(sec / 60), (unsigned long)(sec % 60),
+                         (unsigned long)(wr / 1024));
+            } else {
+                snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %lu.%luMB",
+                         (unsigned)canlog_file_index(),
+                         (unsigned long)(sec / 60), (unsigned long)(sec % 60),
+                         (unsigned long)(wr / (1024UL * 1024UL)),
+                         (unsigned long)((wr % (1024UL * 1024UL)) / (105UL * 1024UL)));
+            }
         } else if (st == CANLOG_ERROR) {
             colour = 0xffa000;
             snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %s", sdcard_status_str());
