@@ -68,6 +68,12 @@ enum OperationalMode {
     MODE_DUAL = 2
 };
 
+// Independent of current_mode: streaming raw CAN over ESP-NOW to an SD
+// recorder node is orthogonal to what the USB/serial side is doing, so a
+// capture can run while the dashboard is in any mode (or nothing is attached
+// at all, which is the whole point - recording a drive without a laptop).
+static volatile bool canlog_streaming = false;
+
 static volatile OperationalMode current_mode = MODE_TELEMETRY;
 static volatile bool demo_mode = false;
 #if ESPDASH_GATEWAY_WIFI
@@ -84,7 +90,11 @@ static portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
 // =========================================================================
 // RAW FRAME RING BUFFER  (canRxTask produces, publishTask consumes)
 // =========================================================================
-#define RAW_RING_SIZE 512
+// 2048 slots (~34 KB). Sized for the canlog path: at the measured 1399
+// frames/s this is ~1.4 s of buffer, enough to ride out radio backpressure
+// when batches contend with the 20 Hz telemetry broadcast. The serial RAW
+// path never needed this much, but the memory is cheap on an S3.
+#define RAW_RING_SIZE 2048
 
 typedef struct {
     uint32_t ms;
@@ -148,6 +158,11 @@ static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint16_t espnow_seq = 0;
 static volatile uint32_t espnow_send_fail = 0;
 static volatile uint32_t tx_truncated = 0;
+
+// canlog counters, reported by STATS so a lossy capture is visible
+static volatile uint32_t canlog_batches_sent = 0;
+static volatile uint32_t canlog_frames_sent = 0;
+static volatile uint32_t canlog_send_fail = 0;
 
 // USB CDC and TCP both accept short writes: write() returns how many bytes it
 // actually took, which is less than requested once the peer stops draining.
@@ -274,19 +289,30 @@ static void process_cmd_string(String cmd) {
                       : (current_mode == MODE_RAW_SNIFFER) ? "RAW_SNIFFER" : "DUAL";
         snprintf(buf, sizeof(buf), "[MODE] CURRENT:%s | DEMO:%s\n", m, demo_mode ? "ON" : "OFF");
         broadcast_line(buf);
+    } else if (cmd == "LOG:ON" || cmd == "LOG_ON" || cmd == "LOG:1") {
+        canlog_streaming = true;
+        broadcast_line("[LOG] CAN log streaming ENABLED (ESP-NOW -> SD recorder)\n");
+    } else if (cmd == "LOG:OFF" || cmd == "LOG_OFF" || cmd == "LOG:0") {
+        canlog_streaming = false;
+        broadcast_line("[LOG] CAN log streaming DISABLED\n");
     } else if (cmd == "STATS") {
-        char buf[160];
+        char buf[220];
 #if ESPDASH_GATEWAY_WIFI
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
-                 "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s\n",
+                 "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
+                 "log:%s batches:%lu logframes:%lu logfail:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
                  (unsigned long)twai_queue_full_events,
                  (unsigned long)tx_truncated,
                  (unsigned long)espnow_send_fail,
-                 wifi_fallback_engaged ? "yes" : "no");
+                 wifi_fallback_engaged ? "yes" : "no",
+                 canlog_streaming ? "on" : "off",
+                 (unsigned long)canlog_batches_sent,
+                 (unsigned long)canlog_frames_sent,
+                 (unsigned long)canlog_send_fail);
 #else
         // No wifi_fallback field: with no Wi-Fi station ever attempted,
         // there's no connection to fall back from. espnow_send_fail is still
@@ -294,13 +320,18 @@ static void process_cmd_string(String cmd) {
         // Wi-Fi, such as an internal queue full.
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
-                 "tx_trunc:%lu espnow_fail:%lu\n",
+                 "tx_trunc:%lu espnow_fail:%lu "
+                 "log:%s batches:%lu logframes:%lu logfail:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
                  (unsigned long)twai_queue_full_events,
                  (unsigned long)tx_truncated,
-                 (unsigned long)espnow_send_fail);
+                 (unsigned long)espnow_send_fail,
+                 canlog_streaming ? "on" : "off",
+                 (unsigned long)canlog_batches_sent,
+                 (unsigned long)canlog_frames_sent,
+                 (unsigned long)canlog_send_fail);
 #endif
         broadcast_line(buf);
     }
@@ -388,6 +419,145 @@ static void canRxTask(void *arg) {
 }
 
 // =========================================================================
+// CANLOG BATCHER - packs raw frames for the ESP-NOW SD recorder
+// =========================================================================
+// Called only from publishTask, so no locking is needed on the batch state.
+//
+// The ID table maps 11-bit CAN ids to a 1-byte index. This car has 45 unique
+// ids, so a byte is ample; anything beyond the table (a new id appearing
+// mid-drive) falls back to an escape marker plus the raw 16-bit id rather
+// than being dropped - an unexpected id is exactly the kind of thing worth
+// capturing.
+#define CANLOG_ID_TABLE_MAX 64
+#define CANLOG_BATCH_MAX_BYTES 240   // ESP-NOW hard limit is 250
+
+static uint16_t canlog_id_table[CANLOG_ID_TABLE_MAX];
+static uint8_t  canlog_id_count = 0;
+static uint32_t last_canlog_ids_send = 0;
+
+static uint8_t  canlog_buf[CANLOG_BATCH_MAX_BYTES];
+static uint16_t canlog_len = 0;       // bytes used in canlog_buf
+static uint8_t  canlog_count = 0;     // frames packed
+static uint32_t canlog_base_ms = 0;
+static uint32_t canlog_first_push_ms = 0;
+
+static uint8_t canlog_id_index(uint32_t id) {
+    for (uint8_t i = 0; i < canlog_id_count; i++) {
+        if (canlog_id_table[i] == (uint16_t)id) return i;
+    }
+    if (canlog_id_count < CANLOG_ID_TABLE_MAX) {
+        canlog_id_table[canlog_id_count] = (uint16_t)id;
+        return canlog_id_count++;
+    }
+    return ESPDASH_CANLOG_ID_ESCAPE;
+}
+
+static void canlog_send_batch() {
+    if (canlog_count == 0) return;
+
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + CANLOG_BATCH_MAX_BYTES];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_CANLOG;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = (uint16_t)(sizeof(EspDashCanLogHdr) + canlog_len);
+    h->seq         = espnow_seq++;
+
+    EspDashCanLogHdr *ch = (EspDashCanLogHdr *)(pkt + sizeof(EspDashHeader));
+    ch->base_ms    = canlog_base_ms;
+    ch->count      = canlog_count;
+    ch->flags      = 0;
+    // Carry the gateway-side drop count so loss is recorded in the log file
+    // itself. A lossy capture must be visible, never silent.
+    ch->gw_dropped = (uint16_t)raw_dropped;
+
+    memcpy(pkt + sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr), canlog_buf, canlog_len);
+
+    size_t total = sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + canlog_len;
+    if (esp_now_send(broadcast_mac, pkt, total) == ESP_OK) {
+        canlog_batches_sent++;
+        canlog_frames_sent += canlog_count;
+    } else {
+        canlog_send_fail++;
+    }
+
+    canlog_len = 0;
+    canlog_count = 0;
+}
+
+static void canlog_add_frame(const RawSlot *s) {
+    uint8_t dlc = s->dlc > 8 ? 8 : s->dlc;
+    uint8_t idx = canlog_id_index(s->id);
+    uint16_t need = 4 + dlc + (idx == ESPDASH_CANLOG_ID_ESCAPE ? 2 : 0);
+
+    if (canlog_count == 0) {
+        canlog_base_ms = s->ms;
+        canlog_first_push_ms = millis();
+    }
+    // Flush before overflowing either the byte budget or the frame count.
+    if (canlog_len + need > CANLOG_BATCH_MAX_BYTES ||
+        canlog_count >= ESPDASH_CANLOG_MAX_FRAMES) {
+        canlog_send_batch();
+        canlog_base_ms = s->ms;
+        canlog_first_push_ms = millis();
+    }
+
+    uint32_t delta = s->ms - canlog_base_ms;
+    if (delta > 0xFFFF) delta = 0xFFFF;   // clamp; batches span far less than 65 s
+
+    uint8_t *p = canlog_buf + canlog_len;
+    *p++ = idx;
+    *p++ = dlc;
+    *p++ = (uint8_t)(delta & 0xFF);
+    *p++ = (uint8_t)(delta >> 8);
+    if (idx == ESPDASH_CANLOG_ID_ESCAPE) {
+        *p++ = (uint8_t)(s->id & 0xFF);
+        *p++ = (uint8_t)((s->id >> 8) & 0xFF);
+    }
+    memcpy(p, s->data, dlc);
+    canlog_len += need;
+    canlog_count++;
+}
+
+// Send the id table periodically so a recording that starts mid-stream is
+// still decodable on its own.
+static void canlog_send_ids(uint32_t now) {
+    if (canlog_id_count == 0) return;
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr) + CANLOG_ID_TABLE_MAX * 2];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_CANLOG_IDS;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = (uint16_t)(sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
+    h->seq         = espnow_seq++;
+
+    EspDashCanLogIdsHdr *ih = (EspDashCanLogIdsHdr *)(pkt + sizeof(EspDashHeader));
+    ih->count = canlog_id_count;
+    ih->reserved = 0;
+    uint8_t *ids = pkt + sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr);
+    for (uint8_t i = 0; i < canlog_id_count; i++) {
+        ids[i*2]     = (uint8_t)(canlog_id_table[i] & 0xFF);
+        ids[i*2 + 1] = (uint8_t)(canlog_id_table[i] >> 8);
+    }
+    esp_now_send(broadcast_mac, pkt,
+                 sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
+    last_canlog_ids_send = now;
+}
+
+// Flush a partial batch that has been sitting too long (quiet bus), and
+// refresh the id table every 2 s.
+static void canlog_flush_if_due(uint32_t now) {
+    if (canlog_count > 0 && (now - canlog_first_push_ms) >= 20) {
+        canlog_send_batch();
+    }
+    if (now - last_canlog_ids_send >= 2000) {
+        canlog_send_ids(now);
+    }
+}
+
+// =========================================================================
 // CORE 0: PUBLISH TASK - owns every byte of output
 // =========================================================================
 
@@ -447,17 +617,32 @@ static void publishTask(void *arg) {
         // ---- 3. Drain the raw ring --------------------------------------
         // Budget per pass keeps JSON/ESP-NOW cadence from being starved by a
         // burst; 64 frames/ms is ~45x the measured mean rate.
+        //
+        // Each popped frame goes to whichever sinks are active: the serial
+        // RAW text stream (when in RAW/DUAL mode) and/or the ESP-NOW canlog
+        // batcher. A frame is popped exactly once and fanned out, so enabling
+        // the recorder never steals frames from a USB capture running at the
+        // same time.
         int budget = 64;
         RawSlot s;
+        bool serial_raw = (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL);
         while (budget-- > 0 && ring_pop(&s)) {
-            int p = snprintf(raw_buf, sizeof(raw_buf), "RAW,%lu,0x%03X,%u,%u",
-                             (unsigned long)s.ms, (unsigned int)s.id, s.rtr, s.dlc);
-            for (int i = 0; i < s.dlc && i < 8; i++) {
-                p += snprintf(raw_buf + p, sizeof(raw_buf) - p, ",%02X", s.data[i]);
+            if (serial_raw) {
+                int p = snprintf(raw_buf, sizeof(raw_buf), "RAW,%lu,0x%03X,%u,%u",
+                                 (unsigned long)s.ms, (unsigned int)s.id, s.rtr, s.dlc);
+                for (int i = 0; i < s.dlc && i < 8; i++) {
+                    p += snprintf(raw_buf + p, sizeof(raw_buf) - p, ",%02X", s.data[i]);
+                }
+                snprintf(raw_buf + p, sizeof(raw_buf) - p, "\n");
+                broadcast_line(raw_buf);
             }
-            snprintf(raw_buf + p, sizeof(raw_buf) - p, "\n");
-            broadcast_line(raw_buf);
+            if (canlog_streaming) {
+                canlog_add_frame(&s);
+            }
         }
+        // Flush a partial batch if it has been waiting too long, so the tail
+        // of a capture is never stranded when the bus goes quiet.
+        if (canlog_streaming) canlog_flush_if_due(now);
 
         // ---- 4. Snapshot -------------------------------------------------
         CanDecodeState snap;

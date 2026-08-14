@@ -40,12 +40,14 @@
 // in one place, if a specific location ever shows contention on 1.
 #define ESPDASH_ESPNOW_CHANNEL 1
 
-// Message types. 1 is the only one implemented today; the rest are reserved so
-// a future node-status or IMU packet does not need a major version bump.
+// Message types. 1 and 4 are implemented; 2 and 3 are reserved so a future
+// node-status or IMU packet does not need a major version bump.
 enum {
-    ESPDASH_MSG_TELEMETRY  = 1,
+    ESPDASH_MSG_TELEMETRY   = 1,
     ESPDASH_MSG_NODE_STATUS = 2,  // reserved: node -> gateway heartbeat
-    ESPDASH_MSG_IMU        = 3    // reserved: GY-BNO08X orientation
+    ESPDASH_MSG_IMU         = 3,  // reserved: GY-BNO08X orientation
+    ESPDASH_MSG_CANLOG      = 4,  // batched raw CAN frames -> SD recorder
+    ESPDASH_MSG_CANLOG_IDS  = 5   // ID index table (makes a log self-describing)
 };
 
 typedef struct __attribute__((packed)) {
@@ -136,6 +138,80 @@ static inline const EspDashTelemetry *espdash_parse(const uint8_t *data, int len
     if (out_len) *out_len = plen;
     if (out_seq) *out_seq = h->seq;
     return (const EspDashTelemetry *)(data + sizeof(EspDashHeader));
+}
+
+// =========================================================================
+// RAW CAN LOG STREAM (msg_type 4/5)
+// =========================================================================
+// Streams raw CAN frames from the gateway to a node with an SD card, so a
+// drive can be captured without a laptop tethered over USB. Measured need on
+// this car: 1399 frames/s mean, 45 unique IDs, avg DLC 6.63 -> ~14.5 KB/s
+// with the variable-length encoding below, about 78 ESP-NOW packets/s.
+//
+// Frames are packed variable-length rather than fixed 13 bytes because the
+// DLC distribution is uneven (avg 6.63, not 8); that alone saves ~18% of
+// airtime, which matters when this shares a radio with 20 Hz telemetry.
+
+#define ESPDASH_CANLOG_MAX_FRAMES 18   // fits in 250 B with worst-case DLC=8
+#define ESPDASH_CANLOG_ID_ESCAPE  0xFF // id_idx value meaning "raw 11-bit id follows"
+
+typedef struct __attribute__((packed)) {
+    uint32_t base_ms;     // gateway millis() of the first frame in this batch
+    uint8_t  count;       // number of frames packed after this header
+    uint8_t  flags;       // reserved for future use
+    uint16_t gw_dropped;  // running gateway-side drop count at time of send
+} EspDashCanLogHdr;
+
+// Each frame follows as:
+//   uint8_t  id_idx       index into the ID table, or ESPDASH_CANLOG_ID_ESCAPE
+//   uint8_t  dlc          low nibble = DLC (0-8), high nibble reserved
+//   uint16_t ts_delta_ms  offset from base_ms
+//   [uint16_t raw_id]     present ONLY when id_idx == ESPDASH_CANLOG_ID_ESCAPE
+//   uint8_t  data[DLC]
+
+// ID index table, sent periodically as msg_type 5 so a capture that starts
+// mid-stream is still decodable on its own.
+typedef struct __attribute__((packed)) {
+    uint8_t  count;       // number of ids that follow
+    uint8_t  reserved;
+    // uint16_t ids[count]
+} EspDashCanLogIdsHdr;
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(EspDashCanLogHdr) == 8, "canlog header must stay 8 bytes");
+#endif
+
+// Deliberately a SEPARATE entry point from espdash_parse(): that function
+// hard-rejects any msg_type other than telemetry, and it must keep doing so.
+// Relaxing it would let a display node interpret a log batch as telemetry and
+// render garbage. Nodes that do not record simply never call this.
+static inline const EspDashCanLogHdr *espdash_parse_canlog(const uint8_t *data, int len,
+                                                           uint16_t *out_len,
+                                                           uint16_t *out_seq) {
+    if (data == NULL || len < (int)(sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr))) return NULL;
+    const EspDashHeader *h = (const EspDashHeader *)data;
+    if (h->magic != ESPDASH_MAGIC) return NULL;
+    if (h->msg_type != ESPDASH_MSG_CANLOG) return NULL;
+    if (h->proto_major != ESPDASH_PROTO_MAJOR) return NULL;
+    uint16_t avail = (uint16_t)(len - sizeof(EspDashHeader));
+    uint16_t plen = h->payload_len < avail ? h->payload_len : avail;
+    if (out_len) *out_len = plen;
+    if (out_seq) *out_seq = h->seq;
+    return (const EspDashCanLogHdr *)(data + sizeof(EspDashHeader));
+}
+
+// Same shape, for the ID table message.
+static inline const EspDashCanLogIdsHdr *espdash_parse_canlog_ids(const uint8_t *data, int len,
+                                                                  uint16_t *out_len) {
+    if (data == NULL || len < (int)(sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr))) return NULL;
+    const EspDashHeader *h = (const EspDashHeader *)data;
+    if (h->magic != ESPDASH_MAGIC) return NULL;
+    if (h->msg_type != ESPDASH_MSG_CANLOG_IDS) return NULL;
+    if (h->proto_major != ESPDASH_PROTO_MAJOR) return NULL;
+    uint16_t avail = (uint16_t)(len - sizeof(EspDashHeader));
+    uint16_t plen = h->payload_len < avail ? h->payload_len : avail;
+    if (out_len) *out_len = plen;
+    return (const EspDashCanLogIdsHdr *)(data + sizeof(EspDashHeader));
 }
 
 #endif  // ESPDASH_PROTO_H

@@ -10,8 +10,16 @@
 
 #include "ui/ui.h"
 #include "ui/screens.h"
+#include "canlog.h"
+#include "bsp/sdcard_bsp.h"
 
 #define LINK_TIMEOUT_MS 1500
+
+// BOOT button. GPIO0 doubles as the ST7701's 3-wire SPI CS during panel init;
+// it only becomes usable as an input after release_st7701_spi_pins().
+#define REC_BUTTON_PIN     0
+#define REC_DEBOUNCE_MS    50
+#define REC_LONGPRESS_MS   2000
 
 // External function defined in ST7701 display driver
 extern "C" void release_st7701_spi_pins(void);
@@ -23,6 +31,10 @@ static uint32_t pkt_gaps = 0;
 static uint16_t last_seq = 0xFFFF;
 static bool     ever_linked = false;
 static EspDashTelemetry current_pkt = {0};
+// Retained so ESPDASH_HAS() can distinguish "gateway sent 0" from "old
+// gateway never sent this field" - it was previously parsed and discarded,
+// which matters once logged data is being analysed.
+static uint16_t current_payload_len = 0;
 
 enum LinkState { LINK_SEARCHING, LINK_LIVE, LINK_LOST };
 
@@ -32,6 +44,11 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
 #else
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 #endif
+    // Raw CAN log batches share this callback. canlog_on_packet() ignores
+    // anything that is not a canlog message and never blocks, so ordering
+    // here is not sensitive.
+    canlog_on_packet(incomingData, len);
+
     uint16_t payload_len = 0;
     uint16_t seq = 0;
     const EspDashTelemetry *pkt = espdash_parse(incomingData, len, &payload_len, &seq);
@@ -46,6 +63,92 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     pkt_count++;
     ever_linked = true;
     current_pkt = *pkt;
+    current_payload_len = payload_len;
+}
+
+// =========================================================================
+// RECORD BUTTON + STATUS LABEL
+// =========================================================================
+static lv_obj_t *rec_label = NULL;
+
+static void rec_button_init(void) {
+    pinMode(REC_BUTTON_PIN, INPUT_PULLUP);
+}
+
+// Short press toggles recording; long press stops and unmounts so the card
+// can be pulled safely.
+static void rec_button_poll(uint32_t now) {
+    static bool     last_raw = true;    // pulled up = released
+    static bool     stable = true;
+    static uint32_t last_change = 0;
+    static uint32_t press_start = 0;
+    static bool     longpress_fired = false;
+
+    bool raw = digitalRead(REC_BUTTON_PIN);
+    if (raw != last_raw) {
+        last_raw = raw;
+        last_change = now;
+        return;
+    }
+    if (now - last_change < REC_DEBOUNCE_MS || raw == stable) return;
+
+    stable = raw;
+    if (!stable) {                       // pressed (active low)
+        press_start = now;
+        longpress_fired = false;
+    } else {                             // released
+        if (!longpress_fired) {
+            if (canlog_state() == CANLOG_RECORDING) canlog_stop();
+            else                                    canlog_start();
+        }
+    }
+    (void)press_start;
+}
+
+static void rec_button_check_longpress(uint32_t now) {
+    static uint32_t held_since = 0;
+    static bool fired = false;
+    if (digitalRead(REC_BUTTON_PIN) == LOW) {
+        if (held_since == 0) held_since = now;
+        else if (!fired && now - held_since >= REC_LONGPRESS_MS) {
+            fired = true;
+            if (canlog_state() == CANLOG_RECORDING) canlog_stop();
+            sdcard_unmount();
+            Serial.println("[REC] long press: card unmounted, safe to remove");
+        }
+    } else {
+        held_since = 0;
+        fired = false;
+    }
+}
+
+// Red REC + elapsed + free space while recording; dim when idle; amber on
+// error. Created here rather than in EEZ so the generated UI can be
+// regenerated without losing it.
+static void rec_label_update(void) {
+    if (!rec_label) return;
+    char buf[64];
+    CanLogState st = canlog_state();
+
+    if (st == CANLOG_RECORDING) {
+        uint32_t sec = canlog_elapsed_ms() / 1000;
+        uint32_t drops = canlog_dropped() + canlog_gw_dropped();
+        if (drops) {
+            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %lu:%02lu  !%lu",
+                     (unsigned long)(sec / 60), (unsigned long)(sec % 60),
+                     (unsigned long)drops);
+        } else {
+            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %lu:%02lu  %luMB",
+                     (unsigned long)(sec / 60), (unsigned long)(sec % 60),
+                     (unsigned long)(canlog_bytes_written() / (1024 * 1024)));
+        }
+    } else if (st == CANLOG_ERROR) {
+        snprintf(buf, sizeof(buf), "#ffa000 SD ERROR#");
+    } else {
+        snprintf(buf, sizeof(buf), "#404858 " LV_SYMBOL_SD_CARD " %luMB#",
+                 (unsigned long)sdcard_free_mb());
+    }
+    lv_label_set_text(rec_label, buf);
 }
 
 // Global LVGL Chart Series Handles
@@ -70,8 +173,13 @@ void setup() {
     // Turn on LCD backlight to full brightness
     lcd_bl_pwm_bsp_init(LCD_PWM_MODE_255);
 
-    // Release 3-wire SPI pins after panel initialization
+    // Release 3-wire SPI pins after panel initialization. This frees GPIO0
+    // (button) and GPIO1/GPIO2, which the SD card needs - so both the button
+    // and the SD mount below MUST come after this call.
     release_st7701_spi_pins();
+
+    rec_button_init();
+    canlog_init();   // mounts SD, allocates PSRAM ring, starts writer task
 
     // Setup WiFi Radio for ESP-NOW (No WiFi association overhead)
     WiFi.disconnect(true, true);
@@ -129,6 +237,15 @@ void setup() {
             lv_obj_set_style_bg_color(objects.rpm_bar, lv_color_hex(0x00BFFF), LV_PART_INDICATOR);
         }
 
+        // Recording status, top-right. Built here rather than in EEZ Studio
+        // so regenerating the UI cannot silently drop it.
+        if (objects.main) {
+            rec_label = lv_label_create(objects.main);
+            lv_label_set_recolor(rec_label, true);
+            lv_obj_align(rec_label, LV_ALIGN_TOP_RIGHT, -8, 6);
+            lv_label_set_text(rec_label, "#404858 --#");
+        }
+
         lvgl_port_unlock();
     }
 
@@ -141,6 +258,11 @@ void setup() {
 
 void loop() {
     uint32_t now = millis();
+
+    // Record button: polled every pass (not just on the 20 Hz UI tick) so a
+    // short press is never missed.
+    rec_button_poll(now);
+    rec_button_check_longpress(now);
 
     // Link Supervision & Demo Mode Generation
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
@@ -225,6 +347,8 @@ static uint16_t speed_buf_idx = 0;
                 lv_bar_set_value(objects.rpm_bar, rpm_clamped, LV_ANIM_OFF);
                 prev_rpm = rpm_clamped;
             }
+
+            rec_label_update();
 
             ui_tick();
             lvgl_port_unlock();
