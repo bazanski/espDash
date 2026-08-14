@@ -318,7 +318,12 @@ static void process_cmd_string(String cmd) {
         canlog_manual = false;
         broadcast_line("[LOG] CAN log streaming DISABLED\n");
     } else if (cmd == "LOGTEST:ON" || cmd == "LOGTEST:1") {
-        logtest_seq = 0;
+        // Deliberately NOT reset: canlog_frames_sent and every other STATS
+        // counter is cumulative since boot, so zeroing this one made
+        // "injected" and "logframes" incomparable across two runs on one
+        // power cycle and looked like frames were being duplicated. Keeping
+        // it monotonic also means the sequence numbers in a capture stay
+        // unique for the whole session.
         logtest_mode = true;
         broadcast_line("[LOGTEST] synthetic 1400 fps injector ENABLED (needs LOG:ON or a node)\n");
     } else if (cmd == "LOGTEST:OFF" || cmd == "LOGTEST:0") {
