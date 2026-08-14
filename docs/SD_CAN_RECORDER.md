@@ -209,6 +209,18 @@ If the link can't sustain full rate, the fallback is an ID allow-list
 ~3×), which still fully serves the fuel/throttle/ignition investigations that
 motivated this.
 
+### The recorder is deliberately independent of `current_mode`
+
+`canlog_active()` is checked on its own, so recording works in the default
+`MODE_TELEMETRY` without switching the gateway into `RAW_SNIFFER`/`DUAL`.
+
+That intent was originally only honoured on the **consumer** side of the raw
+ring. `canRxTask` gated `ring_push()` on `current_mode` alone, so in
+`MODE_TELEMETRY` the ring was never filled and the recorder was starved while
+everything else looked perfect - the car decoded normally and drove the gauges,
+but every recording came back with 0 frames. Both ends of the ring now honour
+`canlog_active()`. When adding a new consumer, check the producer gate too.
+
 ### Why the file number does not always advance
 
 `canlog_stop()` deletes any recording that captured **0 frames**, so its index

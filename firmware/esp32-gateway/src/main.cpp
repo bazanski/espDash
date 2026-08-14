@@ -423,7 +423,14 @@ static void canRxTask(void *arg) {
         g_snapshot = g_state;
         portEXIT_CRITICAL(&state_mux);
 
-        if (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL) {
+        // The raw ring feeds two independent consumers: the serial RAW text
+        // stream (mode-gated) and the ESP-NOW SD recorder (NOT mode-gated -
+        // see canlog_active()). Gating the producer on current_mode alone
+        // silently starved the recorder in the default MODE_TELEMETRY: the
+        // car decoded and drove the gauges perfectly while every recording
+        // came back with 0 frames.
+        if (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL ||
+            canlog_active()) {
             RawSlot s;
             s.ms  = now;
             s.id  = rx.identifier;
