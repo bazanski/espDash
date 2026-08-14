@@ -190,6 +190,8 @@ static volatile uint32_t tx_truncated = 0;
 static volatile uint32_t canlog_batches_sent = 0;
 static volatile uint32_t canlog_frames_sent = 0;
 static volatile uint32_t canlog_send_fail = 0;
+static volatile uint32_t canlog_tx_retries = 0;
+static volatile int      canlog_last_err   = 0;
 static volatile uint32_t espnow_rx_any = 0;   // any ESP-NOW packet received
 static volatile uint32_t espnow_rx_cmd = 0;   // parsed as a node command
 
@@ -339,13 +341,13 @@ static void process_cmd_string(String cmd) {
         snprintf(b, sizeof(b), "[LOGTEST] disabled after %lu frames\n", (unsigned long)logtest_seq);
         broadcast_line(b);
     } else if (cmd == "STATS") {
-        char buf[256];
+        char buf[300];
 #if ESPDASH_GATEWAY_WIFI
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
                  "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu "
-                 "injected:%lu\n",
+                 "injected:%lu retries:%lu lasterr:%d\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -359,7 +361,9 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)canlog_send_fail,
                  (unsigned long)espnow_rx_any,
                  (unsigned long)espnow_rx_cmd,
-                 (unsigned long)logtest_seq);
+                 (unsigned long)logtest_seq,
+                 (unsigned long)canlog_tx_retries,
+                 canlog_last_err);
 #else
         // No wifi_fallback field: with no Wi-Fi station ever attempted,
         // there's no connection to fall back from. espnow_send_fail is still
@@ -369,7 +373,7 @@ static void process_cmd_string(String cmd) {
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu "
                  "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu "
-                 "injected:%lu\n",
+                 "injected:%lu retries:%lu lasterr:%d\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -382,7 +386,9 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)canlog_send_fail,
                  (unsigned long)espnow_rx_any,
                  (unsigned long)espnow_rx_cmd,
-                 (unsigned long)logtest_seq);
+                 (unsigned long)logtest_seq,
+                 (unsigned long)canlog_tx_retries,
+                 canlog_last_err);
 #endif
         broadcast_line(buf);
     }
@@ -543,6 +549,52 @@ static uint8_t canlog_id_index(uint32_t id) {
     return ESPDASH_CANLOG_ID_ESCAPE;
 }
 
+// ESP-NOW hands packets to the Wi-Fi driver asynchronously and only a few TX
+// buffers exist. With no send callback registered the gateway had no idea when
+// one freed, so it simply fired as fast as publishTask produced batches and
+// took ESP_ERR_ESPNOW_NO_MEM (12391) whenever it outran the radio - 91 lost
+// batches in a 30 s bench run, ~1600 CAN frames, at a mere 60 packets/s and
+// 14 KB/s. The problem was never bandwidth; it was that nothing tracked
+// completion. Retrying blindly only papered over it (368 retries still left
+// 91 failures).
+//
+// Now every ESP-NOW transmission waits for the previous one to complete before
+// starting. That paces sends to whatever the radio can actually retire, which
+// is self-tuning and needs no magic delay constant.
+static volatile bool espnow_tx_busy = false;
+
+static void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
+    (void)mac; (void)status;
+    espnow_tx_busy = false;    // runs in Wi-Fi task context: keep it trivial
+}
+
+// Waits for the in-flight packet to retire, then sends. Bounded so a lost
+// completion callback can never wedge the gateway - it degrades to the old
+// fire-and-forget behaviour rather than blocking telemetry forever.
+static esp_err_t espnow_tx_paced(const uint8_t *pkt, size_t len) {
+    for (int w = 0; w < 20 && espnow_tx_busy; w++) vTaskDelay(1);
+    espnow_tx_busy = true;
+    esp_err_t e = esp_now_send(broadcast_mac, pkt, len);
+    if (e != ESP_OK) {
+        espnow_tx_busy = false;
+        // One retry after a yield covers the case where a buffer frees just
+        // as we gave up waiting.
+        if (e == ESP_ERR_ESPNOW_NO_MEM) {
+            canlog_tx_retries++;
+            vTaskDelay(2);
+            espnow_tx_busy = true;
+            e = esp_now_send(broadcast_mac, pkt, len);
+            if (e != ESP_OK) espnow_tx_busy = false;
+        }
+    }
+    if (e != ESP_OK) canlog_last_err = (int)e;
+    return e;
+}
+
+static esp_err_t canlog_tx(const uint8_t *pkt, size_t len) {
+    return espnow_tx_paced(pkt, len);
+}
+
 static void canlog_send_batch() {
     if (canlog_count == 0) return;
 
@@ -566,7 +618,7 @@ static void canlog_send_batch() {
     memcpy(pkt + sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr), canlog_buf, canlog_len);
 
     size_t total = sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + canlog_len;
-    if (esp_now_send(broadcast_mac, pkt, total) == ESP_OK) {
+    if (canlog_tx(pkt, total) == ESP_OK) {
         canlog_batches_sent++;
         canlog_frames_sent += canlog_count;
         last_canlog_tx = millis();
@@ -634,8 +686,8 @@ static void canlog_send_ids(uint32_t now) {
         ids[i*2]     = (uint8_t)(canlog_id_table[i] & 0xFF);
         ids[i*2 + 1] = (uint8_t)(canlog_id_table[i] >> 8);
     }
-    esp_now_send(broadcast_mac, pkt,
-                 sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
+    espnow_tx_paced(pkt,
+                    sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
     last_canlog_ids_send = now;
 }
 
@@ -667,7 +719,7 @@ static void canlog_send_keepalive() {
     ch->flags      = 0;
     ch->gw_dropped = (uint16_t)raw_dropped;
 
-    if (esp_now_send(broadcast_mac, pkt, sizeof(pkt)) == ESP_OK) {
+    if (canlog_tx(pkt, sizeof(pkt)) == ESP_OK) {
         last_canlog_tx = millis();
     } else {
         canlog_send_fail++;
@@ -847,7 +899,10 @@ static void publishTask(void *arg) {
             // mid-run leaves the channel transiently undefined - the failure
             // mode the loop() fallback exists to recover from - and this
             // counter is what makes that failure visible instead of silent.
-            if (esp_now_send(broadcast_mac, pkt, sizeof(pkt)) != ESP_OK) {
+            // Paced like the log path: telemetry sharing the radio
+            // un-paced would keep stealing the TX buffers the recorder
+            // needs, which is half of why the recorder saw NO_MEM.
+            if (espnow_tx_paced(pkt, sizeof(pkt)) != ESP_OK) {
                 espnow_send_fail++;
             }
         }
@@ -928,6 +983,7 @@ static void init_esp_now() {
         return;
     }
     esp_now_register_recv_cb(onEspNowRecv);
+    esp_now_register_send_cb(onEspNowSent);
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, broadcast_mac, 6);
     peer.channel = 0;   // follow the station channel
