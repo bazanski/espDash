@@ -189,9 +189,15 @@ static volatile uint32_t tx_truncated = 0;
 // canlog counters, reported by STATS so a lossy capture is visible
 static volatile uint32_t canlog_batches_sent = 0;
 static volatile uint32_t canlog_frames_sent = 0;
+// Deferred sends, NOT lost data: a batch that cannot go out is held and
+// retried, so this counts radio backpressure events. Frame loss shows up as
+// ring_dropped (ring overflowed while blocked) or as a gap in the recorded
+// sequence - never here.
 static volatile uint32_t canlog_send_fail = 0;
 static volatile uint32_t canlog_tx_retries = 0;
 static volatile int      canlog_last_err   = 0;
+static volatile uint32_t canlog_tx_waits   = 0;   // paced waits that timed out
+static bool              canlog_tx_blocked = false; // batch held, awaiting retry
 static volatile uint32_t espnow_rx_any = 0;   // any ESP-NOW packet received
 static volatile uint32_t espnow_rx_cmd = 0;   // parsed as a node command
 
@@ -346,8 +352,8 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
-                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu "
-                 "injected:%lu retries:%lu lasterr:%d\n",
+                 "log:%s batches:%lu logframes:%lu logdefer:%lu rx_any:%lu rx_cmd:%lu "
+                 "injected:%lu retries:%lu txwait:%lu lasterr:%d\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -363,6 +369,7 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)espnow_rx_cmd,
                  (unsigned long)logtest_seq,
                  (unsigned long)canlog_tx_retries,
+                 (unsigned long)canlog_tx_waits,
                  canlog_last_err);
 #else
         // No wifi_fallback field: with no Wi-Fi station ever attempted,
@@ -372,8 +379,8 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu "
-                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu "
-                 "injected:%lu retries:%lu lasterr:%d\n",
+                 "log:%s batches:%lu logframes:%lu logdefer:%lu rx_any:%lu rx_cmd:%lu "
+                 "injected:%lu retries:%lu txwait:%lu lasterr:%d\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -388,6 +395,7 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)espnow_rx_cmd,
                  (unsigned long)logtest_seq,
                  (unsigned long)canlog_tx_retries,
+                 (unsigned long)canlog_tx_waits,
                  canlog_last_err);
 #endif
         broadcast_line(buf);
@@ -572,7 +580,9 @@ static void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
 // completion callback can never wedge the gateway - it degrades to the old
 // fire-and-forget behaviour rather than blocking telemetry forever.
 static esp_err_t espnow_tx_paced(const uint8_t *pkt, size_t len) {
-    for (int w = 0; w < 20 && espnow_tx_busy; w++) vTaskDelay(1);
+    int w = 0;
+    while (w < 20 && espnow_tx_busy) { vTaskDelay(1); w++; }
+    if (w >= 20) canlog_tx_waits++;   // gave up waiting: radio genuinely behind
     espnow_tx_busy = true;
     esp_err_t e = esp_now_send(broadcast_mac, pkt, len);
     if (e != ESP_OK) {
@@ -595,8 +605,8 @@ static esp_err_t canlog_tx(const uint8_t *pkt, size_t len) {
     return espnow_tx_paced(pkt, len);
 }
 
-static void canlog_send_batch() {
-    if (canlog_count == 0) return;
+static bool canlog_send_batch() {
+    if (canlog_count == 0) return true;
 
     uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + CANLOG_BATCH_MAX_BYTES];
     EspDashHeader *h = (EspDashHeader *)pkt;
@@ -618,19 +628,26 @@ static void canlog_send_batch() {
     memcpy(pkt + sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr), canlog_buf, canlog_len);
 
     size_t total = sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + canlog_len;
-    if (canlog_tx(pkt, total) == ESP_OK) {
-        canlog_batches_sent++;
-        canlog_frames_sent += canlog_count;
-        last_canlog_tx = millis();
-    } else {
+    if (canlog_tx(pkt, total) != ESP_OK) {
+        // Hold the batch and retry on the next pass rather than discarding it.
+        // These are captured CAN frames; a momentarily busy radio is no reason
+        // to lose them. publishTask stops draining the ring while blocked, so
+        // backpressure lands in the 2048-frame ring (~1.5 s at full bus rate)
+        // and any genuine overflow is counted honestly by ring_dropped.
         canlog_send_fail++;
+        canlog_tx_blocked = true;
+        return false;
     }
-
+    canlog_batches_sent++;
+    canlog_frames_sent += canlog_count;
+    last_canlog_tx = millis();
+    canlog_tx_blocked = false;
     canlog_len = 0;
     canlog_count = 0;
+    return true;
 }
 
-static void canlog_add_frame(const RawSlot *s) {
+static bool canlog_add_frame(const RawSlot *s) {
     uint8_t dlc = s->dlc > 8 ? 8 : s->dlc;
     uint8_t idx = canlog_id_index(s->id);
     uint16_t need = 4 + dlc + (idx == ESPDASH_CANLOG_ID_ESCAPE ? 2 : 0);
@@ -642,7 +659,9 @@ static void canlog_add_frame(const RawSlot *s) {
     // Flush before overflowing either the byte budget or the frame count.
     if (canlog_len + need > CANLOG_BATCH_MAX_BYTES ||
         canlog_count >= ESPDASH_CANLOG_MAX_FRAMES) {
-        canlog_send_batch();
+        // Refuse the frame if the full batch could not go out - writing into a
+        // held batch would overflow canlog_buf. The caller holds it instead.
+        if (!canlog_send_batch()) return false;
         canlog_base_ms = s->ms;
         canlog_first_push_ms = millis();
     }
@@ -662,6 +681,7 @@ static void canlog_add_frame(const RawSlot *s) {
     memcpy(p, s->data, dlc);
     canlog_len += need;
     canlog_count++;
+    return true;
 }
 
 // Send the id table periodically so a recording that starts mid-stream is
@@ -807,10 +827,21 @@ static void publishTask(void *arg) {
         // same time.
         if (logtest_mode && canlog_active()) inject_test_frames(now);
 
+        // A frame already popped and already echoed to the serial RAW stream,
+        // which the batcher could not accept because a previous batch is still
+        // waiting to go out. Retried before anything new is drained so ordering
+        // is preserved; only the canlog side is retried, since the serial side
+        // already emitted it.
+        static RawSlot held;
+        static bool    has_held = false;
+        if (has_held) {
+            if (canlog_add_frame(&held)) has_held = false;
+        }
+
         int budget = 64;
         RawSlot s;
         bool serial_raw = (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL);
-        while (budget-- > 0 && ring_pop(&s)) {
+        while (!has_held && budget-- > 0 && ring_pop(&s)) {
             if (serial_raw) {
                 int p = snprintf(raw_buf, sizeof(raw_buf), "RAW,%lu,0x%03X,%u,%u",
                                  (unsigned long)s.ms, (unsigned int)s.id, s.rtr, s.dlc);
@@ -821,7 +852,7 @@ static void publishTask(void *arg) {
                 broadcast_line(raw_buf);
             }
             if (canlog_active()) {
-                canlog_add_frame(&s);
+                if (!canlog_add_frame(&s)) { held = s; has_held = true; }
             }
         }
         // Flush a partial batch if it has been waiting too long, so the tail
