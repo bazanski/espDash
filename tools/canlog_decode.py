@@ -68,7 +68,16 @@ def decode(path):
         "gw_dropped_max": 0,
         "truncated": False,
         "escaped_ids": 0,
+        "resolved_late": 0,
+        "unresolved": 0,
     }
+    # Frames whose id_idx arrives before the ID table does. A recording almost
+    # always starts mid-stream and the table is only broadcast every 2 s, so
+    # the first 1-2 s of every capture lands here. These were previously
+    # dropped on the floor without a word - a 16202-frame capture decoded to
+    # 15194 and nothing said why. Indices are append-only and stable for a
+    # session, so the final table resolves them correctly.
+    pending = []
 
     while pos + 3 <= len(blob):
         rtype = blob[pos]
@@ -122,11 +131,20 @@ def decode(path):
                 data = payload[p:p + dlc]
                 p += dlc
                 if can_id is None:
-                    # id table not seen yet (recording started mid-stream and
-                    # the periodic table hasn't arrived). Skip rather than
-                    # emit a wrong id.
+                    pending.append((len(frames), base_ms + ts_delta, idx, dlc, data))
+                    frames.append(None)          # placeholder, resolved below
                     continue
                 frames.append((base_ms + ts_delta, can_id, dlc, data))
+
+    # Resolve anything that arrived before the ID table, using the most
+    # complete table seen in the file.
+    for slot, ts, idx, dlc, data in pending:
+        if idx < len(id_table):
+            frames[slot] = (ts, id_table[idx], dlc, data)
+            stats["resolved_late"] += 1
+        else:
+            stats["unresolved"] += 1
+    frames = [f for f in frames if f is not None]
 
     return frames, stats
 
@@ -161,6 +179,14 @@ def main():
     print(f"span      : {span:.1f} s  ({len(frames)/span:.0f} fps)" if span > 0 else "span: n/a")
     print(f"unique ids: {len(per_id)}")
     print(f"batches   : {stats['batches']}   id tables: {stats['id_tables']}")
+    if stats["resolved_late"]:
+        print(f"pre-table : {stats['resolved_late']} frames arrived before the "
+              f"first ID table, resolved from the final table")
+    if stats["unresolved"]:
+        print(f"DROPPED   : {stats['unresolved']} frames had an id index absent "
+              f"from every ID table in this file")
+    if stats["truncated"]:
+        print("note      : file ends mid-record (power cut?); decoded up to the last complete one")
     print(f"checksum  : {total_ok}/{total} pass ({100.0*total_ok/total:.1f}%)")
     if stats["gw_dropped_max"]:
         print(f"WARNING   : gateway reported {stats['gw_dropped_max']} dropped frames")

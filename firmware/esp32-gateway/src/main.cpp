@@ -782,6 +782,17 @@ static void publishTask(void *arg) {
             canlog_send_batch();   // don't strand a partial batch
         }
 
+        // Send the ID table the instant the recorder is armed, not on the
+        // next 2 s tick. Without this the first 1-2 s of every recording has
+        // no table to resolve against; the decoder can patch that up
+        // retroactively, but only if a later table exists in the file - a
+        // capture power-cut inside its first 2 s would be undecodable.
+        {
+            static bool prev_active = false;
+            bool active = canlog_active();
+            if (active && !prev_active) last_canlog_ids_send = 0;
+            prev_active = active;
+        }
         if (canlog_active()) canlog_flush_if_due(now);
 
         // ---- 4. Snapshot -------------------------------------------------
