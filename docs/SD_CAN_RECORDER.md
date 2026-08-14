@@ -22,9 +22,8 @@ driving that was going unrecorded.
    recording. The top-right of the display shows a red `REC` with the file
    number, elapsed time and MB written.
 3. **Press BOOT again** to stop: the file is closed and the gateway stops
-   streaming.
-4. **Long-press BOOT (2 s)** to stop *and* unmount, so the card can be pulled
-   safely.
+   streaming. The indicator turns green — that means every byte is on the
+   card and you can pull it or cut power.
 
 Repeat as many times as you like in one drive — each press/press pair makes a
 new numbered file.
@@ -77,7 +76,8 @@ wrong.
 | `REC 1:23  4MB` | Recording normally |
 | `REC 1:23  !57` | Recording, but 57 frames were dropped — see below |
 | `SD ERROR` | No card, mount failed, or a write failed |
-| dim `1234MB` | Idle, showing free space |
+| green `1234MB OK` | Idle and fully flushed — **safe to pull the card or cut power** |
+| dim `1234MB` | Idle, but something is still being written out |
 
 `STATS` on the gateway reports the sending side:
 `log:on batches:1234 logframes:22000 logfail:0`.
@@ -111,6 +111,21 @@ valid and makes the loss explicit.
 **`fsync` every 2 s**, so an ignition cut loses seconds rather than the whole
 file. The format is record-oriented for the same reason: a truncated file
 still decodes cleanly up to its last complete record.
+
+**Removing the card / cutting power.** There is no unmount gesture, because
+none is needed: stopping a recording closes and `fsync`s the file, so nothing
+is in flight. The display shows green `OK` exactly when that is true.
+
+A recording also **auto-stops if the gateway goes silent for 8 s** — ignition
+off, out of range, or gateway rebooted — so the file gets closed properly
+even if you never touch the button. The gateway emits an id-table heartbeat
+every 2 s even on a completely silent CAN bus, so this only trips when the
+gateway itself has actually stopped, not merely when the car is parked.
+
+The one genuinely unsafe moment is cutting power *mid-recording*: worst case
+you lose up to 2 s (the `fsync` interval) and the file simply ends at its
+last complete record. That is a bounded, recoverable loss rather than a
+corrupt file.
 
 **Pin sharing** — the SD (CLK=GPIO1, CMD=GPIO2, D0=GPIO42) shares GPIO1/2
 with the ST7701 panel's 3-wire init SPI, and the BOOT button is GPIO0, which

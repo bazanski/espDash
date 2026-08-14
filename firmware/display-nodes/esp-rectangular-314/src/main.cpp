@@ -19,7 +19,6 @@
 // it only becomes usable as an input after release_st7701_spi_pins().
 #define REC_BUTTON_PIN     0
 #define REC_DEBOUNCE_MS    50
-#define REC_LONGPRESS_MS   2000
 
 // External function defined in ST7701 display driver
 extern "C" void release_st7701_spi_pins(void);
@@ -124,14 +123,17 @@ static void rec_button_init(void) {
     pinMode(REC_BUTTON_PIN, INPUT_PULLUP);
 }
 
-// Short press toggles recording; long press stops and unmounts so the card
-// can be pulled safely.
+// Single short press toggles recording. There is deliberately no long-press
+// gesture: the first version had one for "unmount before removing the card",
+// and it was both buggy (the release still ran the toggle, silently
+// remounting and restarting the recording it had just stopped) and
+// unnecessary. Once a recording is stopped the file is closed and fsync'd,
+// so nothing is in flight and the card can simply be pulled - see
+// canlog_stop() and the "safe to remove" state in rec_label_update().
 static void rec_button_poll(uint32_t now) {
     static bool     last_raw = true;    // pulled up = released
     static bool     stable = true;
     static uint32_t last_change = 0;
-    static uint32_t press_start = 0;
-    static bool     longpress_fired = false;
 
     bool raw = digitalRead(REC_BUTTON_PIN);
     if (raw != last_raw) {
@@ -142,32 +144,9 @@ static void rec_button_poll(uint32_t now) {
     if (now - last_change < REC_DEBOUNCE_MS || raw == stable) return;
 
     stable = raw;
-    if (!stable) {                       // pressed (active low)
-        press_start = now;
-        longpress_fired = false;
-    } else {                             // released
-        if (!longpress_fired) {
-            if (canlog_state() == CANLOG_RECORDING) canlog_stop();
-            else                                    canlog_start();
-        }
-    }
-    (void)press_start;
-}
-
-static void rec_button_check_longpress(uint32_t now) {
-    static uint32_t held_since = 0;
-    static bool fired = false;
-    if (digitalRead(REC_BUTTON_PIN) == LOW) {
-        if (held_since == 0) held_since = now;
-        else if (!fired && now - held_since >= REC_LONGPRESS_MS) {
-            fired = true;
-            if (canlog_state() == CANLOG_RECORDING) canlog_stop();
-            sdcard_unmount();
-            Serial.println("[REC] long press: card unmounted, safe to remove");
-        }
-    } else {
-        held_since = 0;
-        fired = false;
+    if (stable) {                        // released (active low, so this is the edge)
+        if (canlog_state() == CANLOG_RECORDING) canlog_stop();
+        else                                    canlog_start();
     }
 }
 
@@ -197,6 +176,11 @@ static void rec_label_update(void) {
         }
     } else if (st == CANLOG_ERROR) {
         snprintf(buf, sizeof(buf), "#ffa000 SD ERROR#");
+    } else if (canlog_safe_to_remove()) {
+        // Green rather than grey: this is an explicit "everything is on the
+        // card, you can pull it or cut power" signal, not just an idle state.
+        snprintf(buf, sizeof(buf), "#40a060 " LV_SYMBOL_SD_CARD " %luMB OK#",
+                 (unsigned long)sdcard_free_mb());
     } else {
         snprintf(buf, sizeof(buf), "#404858 " LV_SYMBOL_SD_CARD " %luMB#",
                  (unsigned long)sdcard_free_mb());
@@ -325,7 +309,7 @@ void loop() {
     // Record button: polled every pass (not just on the 20 Hz UI tick) so a
     // short press is never missed.
     rec_button_poll(now);
-    rec_button_check_longpress(now);
+    canlog_tick(now);     // auto-closes the file if the gateway goes away
     node_cmd_tick(now);   // keeps the gateway armed while recording
 
     // Link Supervision & Demo Mode Generation

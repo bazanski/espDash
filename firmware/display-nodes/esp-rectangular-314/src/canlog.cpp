@@ -19,6 +19,13 @@
 #define RING_BYTES        (256 * 1024)
 #define WRITE_BLOCK       (8 * 1024)   // fwrite granularity
 #define SYNC_INTERVAL_MS  2000         // fsync cadence
+// If no canlog packet arrives for this long while recording, the gateway is
+// gone (ignition off, out of range, rebooted). Auto-stop so the file is
+// closed cleanly instead of being left open. The gateway sends an id-table
+// heartbeat every 2 s even on a totally silent CAN bus, so this only trips
+// when the gateway itself has actually stopped - not merely when the car is
+// parked with the engine off.
+#define RX_TIMEOUT_MS     8000
 
 // File format:
 //   magic "ESPDASHCANLOG\0" + u8 version + u16 reserved
@@ -55,6 +62,7 @@ static volatile uint16_t s_seq_gaps = 0;
 static uint16_t s_last_seq = 0;
 static bool     s_have_seq = false;
 static uint32_t s_start_ms = 0;
+static volatile uint32_t s_last_rx_ms = 0;
 
 static inline uint32_t ring_used(void) {
     uint32_t h = s_head, t = s_tail;
@@ -113,6 +121,7 @@ void canlog_on_packet(const uint8_t *data, int len) {
         s_have_seq = true;
         s_gw_dropped = ch->gw_dropped;
         s_frames += ch->count;
+        s_last_rx_ms = millis();
         ring_write_record(REC_BATCH, (const uint8_t *)ch, plen);
         return;
     }
@@ -120,6 +129,7 @@ void canlog_on_packet(const uint8_t *data, int len) {
     uint16_t ilen = 0;
     const EspDashCanLogIdsHdr *ih = espdash_parse_canlog_ids(data, len, &ilen);
     if (ih) {
+        s_last_rx_ms = millis();
         ring_write_record(REC_IDS, (const uint8_t *)ih, ilen);
     }
 }
@@ -250,6 +260,7 @@ bool canlog_start(void) {
     s_seq_gaps = 0;
     s_have_seq = false;
     s_start_ms = millis();
+    s_last_rx_ms = s_start_ms;
     s_state = CANLOG_RECORDING;
 
     Serial.printf("[CANLOG] recording -> %s\n", s_filename);
@@ -301,6 +312,19 @@ void canlog_stop(void) {
                   s_filename, (unsigned long)s_frames,
                   (unsigned long)(s_bytes / 1024),
                   (unsigned long)s_dropped, (unsigned)s_seq_gaps);
+}
+
+void canlog_tick(uint32_t now) {
+    if (s_state != CANLOG_RECORDING) return;
+    if ((uint32_t)(now - s_last_rx_ms) > RX_TIMEOUT_MS) {
+        Serial.println("[CANLOG] gateway silent - auto-stopping, file closed cleanly");
+        canlog_stop();
+    }
+}
+
+// Nothing buffered and no file open => every byte is on the card.
+bool canlog_safe_to_remove(void) {
+    return s_state != CANLOG_RECORDING && s_file == NULL && ring_used() == 0;
 }
 
 CanLogState canlog_state(void)        { return s_state; }

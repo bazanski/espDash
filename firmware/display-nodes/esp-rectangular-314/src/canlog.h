@@ -39,6 +39,15 @@ void canlog_on_packet(const uint8_t *data, int len);
 bool canlog_start(void);   // opens a new file; false if SD unavailable
 void canlog_stop(void);    // flushes, closes, returns to IDLE
 
+// Call every loop. Auto-stops a recording when the gateway stops sending
+// (ignition off, out of range, gateway rebooted), so the file is always
+// closed cleanly rather than left open until someone remembers to press the
+// button. This is what makes "just power it off" safe in practice.
+void canlog_tick(uint32_t now);
+
+// True when there is nothing in flight and the card can simply be pulled.
+bool canlog_safe_to_remove(void);
+
 CanLogState canlog_state(void);
 uint16_t    canlog_file_index(void);   // the N in canlog_NNNN.bin
 uint32_t    canlog_frames_written(void);
