@@ -20,7 +20,7 @@
 #define REC_BUTTON_PIN     0
 #define REC_DEBOUNCE_MS    250
 // TEMPORARY diagnostic: set to 0 once the button pin is confirmed.
-#define REC_BUTTON_DEBUG   1
+#define REC_BUTTON_DEBUG   0
 
 // External function defined in ST7701 display driver
 extern "C" void release_st7701_spi_pins(void);
@@ -134,8 +134,6 @@ static volatile uint32_t dbg_presses = 0, dbg_toggles = 0;
 static volatile uint32_t dbg_start_ok = 0, dbg_start_fail = 0;
 static volatile uint32_t dbg_loop_avg = 0, dbg_loop_max = 0;
 static volatile uint32_t dbg_t_btn = 0, dbg_t_tick = 0, dbg_t_ui = 0, dbg_t_lock = 0;
-#else
-#define dbg_presses (*(volatile uint32_t *)0)  // never referenced when debug off
 #endif
 
 // The button is handled by a GPIO interrupt, not by polling.
@@ -413,14 +411,19 @@ void loop() {
 
     // Record button: polled every pass (not just on the 20 Hz UI tick) so a
     // short press is never missed.
+#if REC_BUTTON_DEBUG
     uint32_t _t0 = millis();
+#endif
     rec_button_poll(now);
+#if REC_BUTTON_DEBUG
     uint32_t _t1 = millis();
+#endif
     canlog_tick(now);     // auto-closes the file if the gateway goes away
     node_cmd_tick(now);   // keeps the gateway armed while recording
-    uint32_t _t2 = millis();
+#if REC_BUTTON_DEBUG
     dbg_t_btn  = _t1 - _t0;
-    dbg_t_tick = _t2 - _t1;
+    dbg_t_tick = millis() - _t1;
+#endif
 #if REC_BUTTON_DEBUG
     {
         static uint32_t hb = 0;
@@ -476,11 +479,14 @@ static uint16_t speed_buf_idx = 0;
 
     if (now - last_ui_update >= 50) {
         last_ui_update = now;
+#if REC_BUTTON_DEBUG
         uint32_t _u0 = millis();
-
         uint32_t _l0 = millis();
+#endif
         if (lvgl_port_lock(10)) {
+#if REC_BUTTON_DEBUG
             dbg_t_lock = millis() - _l0;
+#endif
             // Chart feed with dynamic speed autoscale (visible 10s window max + 10 km/h padding, baseline 60 km/h)
             if (objects.history_chart && ser_throttle && ser_brake && ser_speed) {
                 uint16_t spd_kmh = active_pkt.speed_kmh_x10 / 10;
@@ -532,7 +538,9 @@ static uint16_t speed_buf_idx = 0;
             ui_tick();
             lvgl_port_unlock();
         }
+#if REC_BUTTON_DEBUG
         dbg_t_ui = millis() - _u0;
+#endif
     }
 
     delay(20); // Let LVGL task run uncontested between updates
