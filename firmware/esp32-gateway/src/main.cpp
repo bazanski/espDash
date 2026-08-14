@@ -176,6 +176,13 @@ static volatile bool wifi_fallback_engaged = false;
 
 static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint16_t espnow_seq = 0;
+// Separate sequence space for canlog packets. Sharing espnow_seq with the
+// 20 Hz telemetry stream made the node count every telemetry packet as a
+// missing canlog packet: a verified-lossless 16 s capture reported 343 gaps,
+// almost exactly the 320 telemetry + 8 ID-table packets sent in that window.
+// A loss counter that cries wolf is worse than none - it would have masked
+// real loss on the very first drive that had any.
+static uint16_t canlog_seq = 0;
 static volatile uint32_t espnow_send_fail = 0;
 static volatile uint32_t tx_truncated = 0;
 
@@ -546,7 +553,7 @@ static void canlog_send_batch() {
     h->proto_major = ESPDASH_PROTO_MAJOR;
     h->proto_minor = ESPDASH_PROTO_MINOR;
     h->payload_len = (uint16_t)(sizeof(EspDashCanLogHdr) + canlog_len);
-    h->seq         = espnow_seq++;
+    h->seq         = canlog_seq++;
 
     EspDashCanLogHdr *ch = (EspDashCanLogHdr *)(pkt + sizeof(EspDashHeader));
     ch->base_ms    = canlog_base_ms;
@@ -616,6 +623,7 @@ static void canlog_send_ids(uint32_t now) {
     h->proto_major = ESPDASH_PROTO_MAJOR;
     h->proto_minor = ESPDASH_PROTO_MINOR;
     h->payload_len = (uint16_t)(sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
+    // NOT canlog_seq: the node seq-checks only CANLOG batches/keepalives
     h->seq         = espnow_seq++;
 
     EspDashCanLogIdsHdr *ih = (EspDashCanLogIdsHdr *)(pkt + sizeof(EspDashHeader));
@@ -651,7 +659,7 @@ static void canlog_send_keepalive() {
     h->proto_major = ESPDASH_PROTO_MAJOR;
     h->proto_minor = ESPDASH_PROTO_MINOR;
     h->payload_len = sizeof(EspDashCanLogHdr);
-    h->seq         = espnow_seq++;
+    h->seq         = canlog_seq++;
 
     EspDashCanLogHdr *ch = (EspDashCanLogHdr *)(pkt + sizeof(EspDashHeader));
     ch->base_ms    = millis();

@@ -149,13 +149,20 @@ static void write_file_header(void) {
     fwrite(hdr, 1, sizeof(hdr), s_file);
 }
 
+// Set only by canlog_stop(), between "stop accepting new frames" and "close
+// the file". The writer task must keep consuming during that window: without
+// it, canlog_stop() told the writer to stand down and then waited 5 s for a
+// drain that could never happen, silently discarding whatever was still in
+// the ring - the tail of every single recording.
+static volatile bool s_draining = false;
+
 static void sdWriteTask(void *arg) {
     (void)arg;
     static uint8_t block[WRITE_BLOCK];
     uint32_t last_sync = 0;
 
     for (;;) {
-        if (s_state != CANLOG_RECORDING || !s_file) {
+        if ((s_state != CANLOG_RECORDING && !s_draining) || !s_file) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -299,14 +306,25 @@ void canlog_stop(void) {
         s_state = CANLOG_IDLE;
         return;
     }
-    s_state = CANLOG_IDLE;   // stops the writer task from consuming further
+    // Order matters. IDLE first, so canlog_on_packet() stops appending new
+    // frames and the ring can actually reach empty; s_draining so the writer
+    // keeps consuming what is already queued.
+    s_state = CANLOG_IDLE;
+    s_draining = true;
 
     // Drain whatever is still buffered before closing, so the tail of the
-    // capture is not lost.
+    // capture is not lost. Normally finishes in well under 100 ms (a full
+    // 256 KB ring at ~1 MB/s is ~0.25 s); the guard is a backstop for a card
+    // that has stopped responding, not the expected path.
     uint32_t guard = 0;
     while (ring_used() > 0 && guard++ < 500) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    if (ring_used() > 0) {
+        Serial.printf("[CANLOG] WARNING: %lu bytes undrained at stop - card stalled\n",
+                      (unsigned long)ring_used());
+    }
+    s_draining = false;
     bool empty = (s_frames == 0);
     if (s_file) {
         fflush(s_file);
