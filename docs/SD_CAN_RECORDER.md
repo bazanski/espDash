@@ -185,41 +185,39 @@ gained a broadcast peer.
 
 ## Hardware verification status
 
-Verified on the physical units (gateway + esp-rectangular-314, bench, car off):
+Verified on the physical units (gateway + esp-rectangular-314), bench, car
+off, using the synthetic injector (`LOGTEST:ON`) at the measured real-bus rate
+of ~1400 fps with 20 Hz telemetry sharing the radio.
 
-- **SD mount and self-test** on the real card — `sd=OK`, write/readback/delete
-  passes. Card must be **FAT32 + MBR**; exFAT and GPT will not mount.
-- **BOOT is wired to GPIO0** on this board and works as the record trigger.
-  6 presses produced 6 toggles and 3 clean start/stop cycles.
-- **The upstream node→gateway path** (the new direction; the gateway had never
-  received an ESP-NOW packet before this): 27 commands sent, 27 received, 27
-  parsed — zero send failures, zero loss, zero parse rejects.
-- **Gateway→node telemetry keeps flowing** throughout, and the gateway
-  keepalive reaches the node while armed.
+**Lossless capture, confirmed from the bytes on the card** - not from the
+gateway's own counters. Each frame carries a 32-bit sequence number, so the
+decoded CSV proves exact continuity:
+
+| capture | manifest | decoded | span | dups | gaps | missing |
+|---|---|---|---|---|---|---|
+| `canlog_0034` | 16726 | 16726 | 16726 | 0 | 0 | **0** |
+| `canlog_0036` | 16202 | 16202 | 16202 | 0 | 0 | **0** |
+| `canlog_0038` | 22136 | 22136 | 22136 | 0 | 0 | **0** |
+| `canlog_0039` | 24544 | 24544 | 24544 | 0 | 0 | **0** |
+
+Also confirmed: SD mount and self-test on the real card; BOOT on GPIO0 as the
+record trigger; the node arming the gateway over ESP-NOW (43/43 commands
+received and parsed, zero send failures); `ring_dropped 0` throughout.
 
 Still untested, and only testable on a live bus:
 
-- Sustained ~78 packets/s over ESP-NOW while 20 Hz telemetry shares the radio
+- Real frames from the car end to end (all bench captures are synthetic)
 - Whether display gauges stay smooth during recording
-- End-to-end capture of real frames (every bench recording captured 0 frames,
-  because with the car off there is no bus traffic — see below)
 
-If the link can't sustain full rate, the fallback is an ID allow-list
-(logging only the ~11 decoded IDs plus the unmapped candidates cuts the rate
-~3×), which still fully serves the fuel/throttle/ignition investigations that
-motivated this.
+### Known residual
 
-### The recorder is deliberately independent of `current_mode`
-
-`canlog_active()` is checked on its own, so recording works in the default
-`MODE_TELEMETRY` without switching the gateway into `RAW_SNIFFER`/`DUAL`.
-
-That intent was originally only honoured on the **consumer** side of the raw
-ring. `canRxTask` gated `ring_push()` on `current_mode` alone, so in
-`MODE_TELEMETRY` the ring was never filled and the recorder was starved while
-everything else looked perfect - the car decoded normally and drove the gauges,
-but every recording came back with 0 frames. Both ends of the ring now honour
-`canlog_active()`. When adding a new consumer, check the producer gate too.
+A capture that is power-cut within its first ~2 s may contain no ID table.
+The gateway is supposed to send one the instant it is armed, but this is not
+reliably taking effect: `canlog_0039` still opened with 2022 pre-table frames
+where `canlog_0038` had only 64. Harmless in practice - the decoder resolves
+them from the final table and reports the count - but a capture with no table
+at all would be undecodable. Suspected cause: the drain loop sends batches
+before the arm edge is detected on the same pass.
 
 ### Why the file number does not always advance
 
