@@ -1,7 +1,7 @@
 #ifndef EEZ_LVGL_UI_SCREENS_H
 #define EEZ_LVGL_UI_SCREENS_H
 
-#include "lvgl.h"
+#include <lvgl/lvgl.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,16 +12,20 @@ extern "C" {
 enum ScreensEnum {
     _SCREEN_ID_FIRST = 1,
     SCREEN_ID_MAIN = 1,
-    _SCREEN_ID_LAST = 1
+    SCREEN_ID_TYRES = 2,
+    _SCREEN_ID_LAST = 2
 };
 
 typedef struct _objects_t {
     lv_obj_t *main;
+    lv_obj_t *tyres;
     lv_obj_t *left_tiers;
     lv_obj_t *history_chart;
     lv_obj_t *throttle_bar;
     lv_obj_t *brake_bar;
     lv_obj_t *rpm_bar;
+    lv_obj_t *status_label;
+    lv_obj_t *warning_label;
 } objects_t;
 
 extern objects_t objects;
@@ -37,6 +41,9 @@ extern screen_main_state_t screen_main_state;
 
 void create_screen_main();
 void tick_screen_main();
+
+void create_screen_tyres();
+void tick_screen_tyres();
 
 void tick_screen_by_id(enum ScreensEnum screenId);
 void tick_screen(int screen_index);

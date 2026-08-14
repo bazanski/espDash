@@ -96,6 +96,28 @@ void create_screen_main() {
             lv_bar_set_range(obj, 0, 7000);
             lv_bar_set_value(obj, 2500, LV_ANIM_ON);
         }
+        {
+            // status_label
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.status_label = obj;
+            lv_obj_set_pos(obj, 115, 38);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_label_set_long_mode(obj, LV_LABEL_LONG_SCROLL_CIRCULAR);
+            lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(obj, &lv_font_montserrat_20, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text_static(obj, "Recording is ON/OFF");
+        }
+        {
+            // warning_label
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.warning_label = obj;
+            lv_obj_set_pos(obj, 115, 60);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_label_set_long_mode(obj, LV_LABEL_LONG_SCROLL_CIRCULAR);
+            lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(obj, &lv_font_montserrat_20, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text_static(obj, "Recording is ON/OFF");
+        }
     }
     
     tick_screen_main();
@@ -106,12 +128,25 @@ void tick_screen_main() {
     (void)state;
 }
 
+void create_screen_tyres() {
+    lv_obj_t *obj = lv_obj_create(0);
+    objects.tyres = obj;
+    lv_obj_set_pos(obj, 0, 0);
+    lv_obj_set_size(obj, 820, 320);
+    
+    tick_screen_tyres();
+}
+
+void tick_screen_tyres() {
+}
+
 typedef void (*tick_screen_func_t)();
 tick_screen_func_t tick_screen_funcs[] = {
     tick_screen_main,
+    tick_screen_tyres,
 };
 void tick_screen(int screen_index) {
-    if (screen_index >= 0 && screen_index < 1) {
+    if (screen_index >= 0 && screen_index < 2) {
         tick_screen_funcs[screen_index]();
     }
 }
@@ -209,4 +244,5 @@ void create_screens() {
     // Initialize screens
     // Create screens
     create_screen_main();
+    create_screen_tyres();
 }

@@ -1,0 +1,244 @@
+# In-Car CAN Recorder (SD card, no laptop)
+
+Records raw CAN to the SD card on `esp-rectangular-314`, streamed from the
+gateway over ESP-NOW. No laptop, no Wi-Fi, no USB tether.
+
+## Why
+
+Every capture before this required the web dashboard connected over USB, so
+real driving data only got recorded when planned in advance. The fuel-level
+bug is the cost of that: the light came on at a decoded "43%" and a full tank
+read "56-58%", but there was no raw dump of that drive to diagnose from. The
+fuel curve needs points across a whole tank, the throttle ceiling needs a WOT
+run, and the ignition-bit candidates need clean key cycles — all normal
+driving that was going unrecorded.
+
+## Using it
+
+**No laptop needed. One button.**
+
+1. **Insert a FAT32 SD card** into the 3.14 node.
+2. **Press BOOT on the node** — it arms the gateway over ESP-NOW *and* starts
+   recording. The top-right of the display shows a red `REC` with the file
+   number, elapsed time and MB written.
+3. **Press BOOT again** to stop: the file is closed and the gateway stops
+   streaming. The indicator turns green — that means every byte is on the
+   card and you can pull it or cut power.
+
+Repeat as many times as you like in one drive — each press/press pair makes a
+new numbered file.
+
+`LOG:ON` / `LOG:OFF` over USB serial still work as a manual override for
+bench testing. The two are independent: the gateway streams if *either* the
+serial latch is on or a node is asking.
+
+### Several recordings per drive
+
+Files are `/sdcard/canlog_0000.bin`, `canlog_0001.bin`, … The node picks the
+first unused index, so recordings never overwrite each other, even across
+power cycles.
+
+**The file number is shown on screen while recording**, so you can note what
+you were doing ("0003 was the fill-up").
+
+On stop, a line is appended to `/sdcard/canlog_index.csv`:
+
+```
+file,start_uptime_ms,duration_s,frames,bytes,node_dropped,gw_dropped,seq_gaps
+canlog_0000.bin,184333,109,152896,1724000,0,0,0
+```
+
+There's no RTC on this board, so `start_uptime_ms` (gateway uptime at the
+start of the recording) is the closest thing to a clock — it orders the
+recordings and shows how far into the drive each one began. Inventing a
+wall-clock timestamp would be worse than an honest relative one.
+
+## Decoding
+
+```bash
+python3 tools/canlog_decode.py canlog_0000.bin --stats   # summary only
+python3 tools/canlog_decode.py canlog_0000.bin -o drive.csv
+```
+
+The CSV matches the schema the web dashboard produces, so every existing
+analysis script works unchanged.
+
+`--stats` prints a Honda-checksum pass rate. That is the integrity check on
+the whole wireless path: **expect ~98%, with `0x255` as the only failing ID**
+(it genuinely doesn't use Honda's checksum scheme). A materially lower rate
+means frames were corrupted or misaligned in transit, not that the decode is
+wrong.
+
+## Reading the indicators
+
+| Display | Meaning | Fix |
+|---|---|---|
+| `REC 0003 1:23  4MB` | Recording normally (file `canlog_0003.bin`) | — |
+| `REC 0003 1:23  !57` | Recording, but 57 frames were dropped | see drop counters below |
+| green `1234MB OK` | Idle and fully flushed — **safe to pull the card or cut power** | — |
+| dim `1234MB` | Idle, still flushing | wait for green |
+| `NO CARD` | Card absent, unseated, or wiring fault | reseat the card |
+| `FORMAT FAT32` | Card present but no mountable FAT volume | **reformat as FAT32** |
+| `CARD FULL` | Under 64 MB free | free space or swap cards |
+| `WRITE FAIL` | Write or read-back failed | card pulled mid-write, or failing/counterfeit card |
+
+## Card compatibility
+
+**FAT32 only.** ESP-IDF mounts FAT12/16/32; exFAT is not enabled. **Any card
+over 32 GB is exFAT out of the box** and will refuse to mount — this is the
+single most likely reason a brand-new card "doesn't work". The display says
+`FORMAT FAT32` rather than a generic error precisely because that case is
+common and the fix is not obvious.
+
+A 32 GB FAT32 card holds roughly 9 hours of recording (~57 MB/hr).
+
+**The card is never reformatted automatically** (`format_if_mount_failed =
+false`) — wiping a card that happens to contain something else would be a
+poor trade for convenience.
+
+**Self-test at boot.** After mounting, a small file is written, read back,
+compared and deleted. Mounting only proves the FAT is *readable*; failing and
+counterfeit cards routinely mount fine and then silently discard writes.
+Catching that at boot beats discovering it after a drive. Look for
+`[SD] self-test passed` on serial.
+
+**Free space is checked before starting**, not during. Starting a drive on a
+nearly-full card and failing 10 minutes in is worse than refusing up front,
+where it can still be fixed.
+
+`STATS` on the gateway reports the sending side:
+`log:on batches:1234 logframes:22000 logfail:0`.
+
+**Drop counters are deliberately visible.** A lossy capture must never look
+like a clean one. Losses are counted in three independent places and all of
+them survive into the file:
+- `gw_dropped` — gateway ring overflowed before transmit (embedded per batch)
+- node ring overflow — SD couldn't keep up
+- ESP-NOW sequence gaps — packets lost over the air
+
+## Design notes
+
+**Bandwidth**, measured from a real 109 s drive (1,399 frames/s, 45 unique
+IDs, avg DLC 6.63): variable-length encoding gives **11.3 bytes/frame ≈ 15.8
+KB/s**, about 78 ESP-NOW packets/s. Verified lossless: 5,000 real frames
+encoded and decoded byte-exact, timestamps included.
+
+**SD is not the bottleneck** — SDMMC 1-bit sustains ~1-2 MB/s against a
+~16 KB/s need, roughly 70× headroom. The real risk is write *latency*: cards
+stall 50-250 ms for internal block erase. That's why the receive path never
+touches the card directly — the ESP-NOW callback only memcpy's into a 256 KB
+PSRAM ring and returns, and a separate low-priority task drains it in 8 KB
+blocks. 256 KB is >15 s of buffer, far beyond any realistic stall.
+
+**On overflow the newest record is dropped, not the oldest** — the opposite
+of the gateway's live-monitoring ring. For a log, already-buffered bytes are
+the ones belonging to a coherent file; discarding the newest keeps the file
+valid and makes the loss explicit.
+
+**`fsync` every 2 s**, so an ignition cut loses seconds rather than the whole
+file. The format is record-oriented for the same reason: a truncated file
+still decodes cleanly up to its last complete record.
+
+**Removing the card / cutting power.** There is no unmount gesture, because
+none is needed: stopping a recording closes and `fsync`s the file, so nothing
+is in flight. The display shows green `OK` exactly when that is true.
+
+A recording also **auto-stops if the gateway goes silent for 8 s** — ignition
+off, out of range, or gateway rebooted — so the file gets closed properly
+even if you never touch the button. The gateway emits an id-table heartbeat
+every 2 s even on a completely silent CAN bus, so this only trips when the
+gateway itself has actually stopped, not merely when the car is parked.
+
+The one genuinely unsafe moment is cutting power *mid-recording*: worst case
+you lose up to 2 s (the `fsync` interval) and the file simply ends at its
+last complete record. That is a bounded, recoverable loss rather than a
+corrupt file.
+
+**Pin sharing** — the SD (CLK=GPIO1, CMD=GPIO2, D0=GPIO42) shares GPIO1/2
+with the ST7701 panel's 3-wire init SPI, and the BOOT button is GPIO0, which
+is the panel's init CS. All three only become available after
+`release_st7701_spi_pins()`, so `canlog_init()` and `rec_button_init()` must
+stay *after* that call in `setup()`. The board is designed for this handoff —
+the panel only needs those pins during init.
+
+**A separate message type** (`ESPDASH_MSG_CANLOG = 4`) with its own parser,
+`espdash_parse_canlog()`. `espdash_parse()` still hard-rejects anything that
+isn't telemetry, deliberately: relaxing it would let a display node render a
+log batch as telemetry. Nodes that don't record simply never call the new
+parser and ignore type 4 harmlessly.
+
+**Arming is a repeated state advertisement, not an on/off command.** The node
+broadcasts "I want raw CAN" (`ESPDASH_MSG_NODE_CMD = 6`) twice a second while
+recording, and the gateway holds that state only while requests keep
+arriving, forgetting after 3 s. Edge-triggered commands would be fragile over
+fire-and-forget ESP-NOW: one dropped "start" means recording an empty file,
+one dropped "stop" means the gateway transmits forever. Repeating makes it
+self-healing in every direction:
+
+- lost packet → the next one lands ~500 ms later
+- node switched off or out of range → gateway stops by itself, no wasted airtime
+- gateway rebooted mid-recording → the node's next advert re-arms it automatically
+
+This is also the first **upstream** message in the project (everything else
+flows gateway → nodes), so the gateway gained a receive callback and the node
+gained a broadcast peer.
+
+## Hardware verification status
+
+Verified on the physical units (gateway + esp-rectangular-314), bench, car
+off, using the synthetic injector (`LOGTEST:ON`) at the measured real-bus rate
+of ~1400 fps with 20 Hz telemetry sharing the radio.
+
+**Lossless capture, confirmed from the bytes on the card** - not from the
+gateway's own counters. Each frame carries a 32-bit sequence number, so the
+decoded CSV proves exact continuity:
+
+| capture | manifest | decoded | span | dups | gaps | missing |
+|---|---|---|---|---|---|---|
+| `canlog_0034` | 16726 | 16726 | 16726 | 0 | 0 | **0** |
+| `canlog_0036` | 16202 | 16202 | 16202 | 0 | 0 | **0** |
+| `canlog_0038` | 22136 | 22136 | 22136 | 0 | 0 | **0** |
+| `canlog_0039` | 24544 | 24544 | 24544 | 0 | 0 | **0** |
+
+Also confirmed: SD mount and self-test on the real card; BOOT on GPIO0 as the
+record trigger; the node arming the gateway over ESP-NOW (43/43 commands
+received and parsed, zero send failures); `ring_dropped 0` throughout.
+
+Still untested, and only testable on a live bus:
+
+- Real frames from the car end to end (all bench captures are synthetic)
+- Whether display gauges stay smooth during recording
+
+### Known residual
+
+A capture that is power-cut within its first ~2 s may contain no ID table.
+The gateway is supposed to send one the instant it is armed, but this is not
+reliably taking effect: `canlog_0039` still opened with 2022 pre-table frames
+where `canlog_0038` had only 64. Harmless in practice - the decoder resolves
+them from the final table and reports the count - but a capture with no table
+at all would be undecodable. Suspected cause: the drain loop sends batches
+before the arm edge is detected on the same pass.
+
+### Why the file number does not always advance
+
+`canlog_stop()` deletes any recording that captured **0 frames**, so its index
+is reused by the next attempt. Pressing BOOT with the car off therefore
+produces `canlog_0034.bin` over and over rather than 34, 35, 36. This is
+intended — it keeps the card from filling with empty files and keeps the
+numbering meaningful for finding a real drive. A repeating number is a useful
+signal in itself: **nothing is arriving from the bus.**
+
+### Debug heartbeat
+
+`REC_BUTTON_DEBUG` (top of the node's `main.cpp`, currently `1`) prints a
+periodic one-liner:
+
+```
+[BTN] presses=6 toggles=6 ok=3 fail=0 state=0 file=0034 sd=OK tlm=3617 clog=11 tx=27 txfail=0(0) loop=108ms
+```
+
+`tx`/`txfail` are the node's `esp_now_send()` results and pair with the
+gateway's `rx_any`/`rx_cmd` in `STATS`. Together they separate "never
+transmitted" from "transmitted and lost" from "arrived but rejected by the
+parser" — a distinction that cost several debugging cycles to add. Leave this
+on until the first successful car capture.

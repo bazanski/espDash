@@ -10,8 +10,17 @@
 
 #include "ui/ui.h"
 #include "ui/screens.h"
+#include "canlog.h"
+#include "bsp/sdcard_bsp.h"
 
 #define LINK_TIMEOUT_MS 1500
+
+// BOOT button. GPIO0 doubles as the ST7701's 3-wire SPI CS during panel init;
+// it only becomes usable as an input after release_st7701_spi_pins().
+#define REC_BUTTON_PIN     0
+#define REC_DEBOUNCE_MS    250
+// TEMPORARY diagnostic: set to 0 once the button pin is confirmed.
+#define REC_BUTTON_DEBUG   1
 
 // External function defined in ST7701 display driver
 extern "C" void release_st7701_spi_pins(void);
@@ -23,6 +32,10 @@ static uint32_t pkt_gaps = 0;
 static uint16_t last_seq = 0xFFFF;
 static bool     ever_linked = false;
 static EspDashTelemetry current_pkt = {0};
+// Retained so ESPDASH_HAS() can distinguish "gateway sent 0" from "old
+// gateway never sent this field" - it was previously parsed and discarded,
+// which matters once logged data is being analysed.
+static uint16_t current_payload_len = 0;
 
 enum LinkState { LINK_SEARCHING, LINK_LIVE, LINK_LOST };
 
@@ -32,6 +45,11 @@ void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDat
 #else
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 #endif
+    // Raw CAN log batches share this callback. canlog_on_packet() ignores
+    // anything that is not a canlog message and never blocks, so ordering
+    // here is not sensitive.
+    canlog_on_packet(incomingData, len);
+
     uint16_t payload_len = 0;
     uint16_t seq = 0;
     const EspDashTelemetry *pkt = espdash_parse(incomingData, len, &payload_len, &seq);
@@ -46,6 +64,224 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     pkt_count++;
     ever_linked = true;
     current_pkt = *pkt;
+    current_payload_len = payload_len;
+}
+
+// =========================================================================
+// RECORD BUTTON + STATUS LABEL
+// =========================================================================
+static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint16_t node_cmd_seq = 0;
+#if REC_BUTTON_DEBUG
+static volatile uint32_t dbg_cmd_sent = 0, dbg_cmd_fail = 0;
+static volatile int      dbg_cmd_err = 0;
+#endif
+
+// Tell the gateway whether we want raw CAN streamed to us. Repeated rather
+// than edge-triggered: ESP-NOW is fire-and-forget, so a single lost "start"
+// would mean recording an empty file. See EspDashProto.h for the full
+// rationale - the gateway forgets us if these stop arriving, which is what
+// makes the link self-healing in both directions.
+static void send_node_cmd(bool want) {
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashNodeCmd)];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_NODE_CMD;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = sizeof(EspDashNodeCmd);
+    h->seq         = node_cmd_seq++;
+
+    EspDashNodeCmd *c = (EspDashNodeCmd *)(pkt + sizeof(EspDashHeader));
+    c->want_canlog = want ? 1 : 0;
+    c->node_id     = 1;          // esp-rectangular-314
+    c->reserved    = 0;
+
+    esp_err_t e = esp_now_send(broadcast_mac, pkt, sizeof(pkt));
+#if REC_BUTTON_DEBUG
+    if (e == ESP_OK) dbg_cmd_sent++;
+    else { dbg_cmd_fail++; dbg_cmd_err = e; }
+#else
+    (void)e;
+#endif
+}
+
+// Re-advertise while recording; also send a few explicit stops on release so
+// the gateway reacts immediately instead of waiting out the timeout.
+static void node_cmd_tick(uint32_t now) {
+    static uint32_t last_send = 0;
+    static uint8_t  stop_bursts = 0;
+    static bool     was_recording = false;
+
+    bool recording = (canlog_state() == CANLOG_RECORDING);
+
+    if (was_recording && !recording) stop_bursts = 3;
+    was_recording = recording;
+
+    if (now - last_send < ESPDASH_NODE_CMD_INTERVAL_MS) return;
+    last_send = now;
+
+    if (recording) {
+        send_node_cmd(true);
+    } else if (stop_bursts) {
+        stop_bursts--;
+        send_node_cmd(false);
+    }
+}
+
+#if REC_BUTTON_DEBUG
+static volatile uint32_t dbg_presses = 0, dbg_toggles = 0;
+static volatile uint32_t dbg_start_ok = 0, dbg_start_fail = 0;
+static volatile uint32_t dbg_loop_avg = 0, dbg_loop_max = 0;
+static volatile uint32_t dbg_t_btn = 0, dbg_t_tick = 0, dbg_t_ui = 0, dbg_t_lock = 0;
+#else
+#define dbg_presses (*(volatile uint32_t *)0)  // never referenced when debug off
+#endif
+
+// The button is handled by a GPIO interrupt, not by polling.
+//
+// Polling from loop() cannot work on this board: the LVGL port task runs at
+// priority 5 on core 1 while the Arduino loopTask runs at priority 1, and
+// rendering the 820x320 RGB panel starves the loop badly enough that
+// delay(20) actually returns after ~150 ms (measured: every section of
+// loop() timed 0 ms, yet the loop period was 131-158 ms). A press and its
+// release both fit inside one such gap, so the level was frequently sampled
+// as HIGH both before and after - the press simply never existed as far as
+// the debounce state machine was concerned. That is why 3 presses produced
+// only 2 debounced edges and 1 toggle.
+//
+// An interrupt fires regardless of task scheduling, so it is immune to that
+// entirely. Debouncing happens in the ISR by ignoring anything within
+// REC_DEBOUNCE_MS of the last accepted press.
+static volatile uint32_t isr_last_press_ms = 0;
+static volatile bool     isr_press_pending = false;
+
+static void IRAM_ATTR rec_button_isr(void) {
+    // millis() is backed by esp_timer_get_time(), which is ISR-safe.
+    uint32_t t = millis();
+    if (t - isr_last_press_ms < REC_DEBOUNCE_MS) return;   // bounce
+    isr_last_press_ms = t;
+    isr_press_pending = true;
+#if REC_BUTTON_DEBUG
+    dbg_presses++;
+#endif
+}
+
+static void rec_button_init(void) {
+    pinMode(REC_BUTTON_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(REC_BUTTON_PIN), rec_button_isr, FALLING);
+}
+
+// Consumes at most one press per call. Safe to call at whatever rate loop()
+// manages - the ISR does not lose presses in between.
+static void rec_button_poll(uint32_t now) {
+    (void)now;
+    if (!isr_press_pending) return;
+    isr_press_pending = false;
+#if REC_BUTTON_DEBUG
+    dbg_toggles++;
+#endif
+    if (canlog_state() == CANLOG_RECORDING) {
+        canlog_stop();
+    } else {
+#if REC_BUTTON_DEBUG
+        if (canlog_start()) dbg_start_ok++; else dbg_start_fail++;
+#else
+        canlog_start();
+#endif
+    }
+}
+
+// Drives the two EEZ labels on the Main screen:
+//   status_label  (115,38) - recording state, always populated
+//   warning_label (115,60) - only speaks up when something is wrong
+//
+// Colour is applied here with an explicit style, not via EEZ and not via
+// LVGL's "#rrggbb ...#" recolor markup. EEZ generated no styles at all for
+// this project (styles.c is empty), and the build runs the LIGHT theme
+// (LV_THEME_DEFAULT_DARK 0) over a near-black background (0x0f111a) - so an
+// unstyled label renders dark-on-dark and is effectively invisible. Setting
+// the colour per state in code is both correct and survives a UI re-export.
+static void rec_label_update(void) {
+    char buf[64];
+    CanLogState st = canlog_state();
+
+#if REC_BUTTON_DEBUG
+    static uint32_t dbg_next = 0;
+    if (millis() >= dbg_next) {
+        dbg_next = millis() + 3000;
+        Serial.printf("[UI] status_label=%p warning_label=%p state=%d\n",
+                      (void *)objects.status_label, (void *)objects.warning_label, (int)st);
+    }
+#endif
+
+    // ---- status: what the recorder is doing right now --------------------
+    if (objects.status_label) {
+        uint32_t colour;
+        if (st == CANLOG_RECORDING) {
+            uint32_t sec = canlog_elapsed_ms() / 1000;
+            colour = 0xff4040;
+            // File number is shown throughout so a recording can be tied back
+            // to what you were doing at the time.
+            // KB below 1 MB: at ~14.5 KB/s a capture takes over a minute to
+            // reach 1 MB, so a plain MB figure sits at "0MB" for the whole of
+            // a short recording and reads as "nothing is being written".
+            uint32_t wr = canlog_bytes_written();
+            if (wr < 1024UL * 1024UL) {
+                snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %luKB",
+                         (unsigned)canlog_file_index(),
+                         (unsigned long)(sec / 60), (unsigned long)(sec % 60),
+                         (unsigned long)(wr / 1024));
+            } else {
+                snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %lu.%luMB",
+                         (unsigned)canlog_file_index(),
+                         (unsigned long)(sec / 60), (unsigned long)(sec % 60),
+                         (unsigned long)(wr / (1024UL * 1024UL)),
+                         (unsigned long)((wr % (1024UL * 1024UL)) / (105UL * 1024UL)));
+            }
+        } else if (st == CANLOG_ERROR) {
+            colour = 0xffa000;
+            snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %s", sdcard_status_str());
+        } else if (canlog_safe_to_remove()) {
+            // Green is an explicit "every byte is on the card, you can pull it
+            // or cut power" signal, not merely an idle state.
+            colour = 0x40c070;
+            snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB  SAFE",
+                     (unsigned long)sdcard_free_mb());
+        } else {
+            colour = 0x8892a4;
+            snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB",
+                     (unsigned long)sdcard_free_mb());
+        }
+        lv_obj_set_style_text_color(objects.status_label, lv_color_hex(colour), LV_PART_MAIN);
+        lv_label_set_text(objects.status_label, buf);
+    }
+
+    // ---- warning: silent unless there is something to say ----------------
+    // Kept empty in the normal case on purpose. A warning line that always
+    // shows something trains you to ignore it, which defeats the point.
+    if (objects.warning_label) {
+        uint32_t drops = canlog_dropped() + canlog_gw_dropped();
+        uint16_t gaps  = canlog_seq_gaps();
+
+        if (st == CANLOG_ERROR) {
+            // Name the actual cause: this is read in a car with no serial
+            // monitor, where a bare "SD ERROR" leaves you guessing between a
+            // missing card, an exFAT card needing a reformat, and a full one -
+            // each with a completely different fix.
+            lv_obj_set_style_text_color(objects.warning_label, lv_color_hex(0xff4040), LV_PART_MAIN);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_WARNING " %s", sdcard_status_str());
+            lv_label_set_text(objects.warning_label, buf);
+        } else if (st == CANLOG_RECORDING && (drops || gaps)) {
+            // Frames lost somewhere in the chain - the capture will have holes.
+            lv_obj_set_style_text_color(objects.warning_label, lv_color_hex(0xffa000), LV_PART_MAIN);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_WARNING " lost %lu  gaps %u",
+                     (unsigned long)drops, (unsigned)gaps);
+            lv_label_set_text(objects.warning_label, buf);
+        } else {
+            lv_label_set_text(objects.warning_label, "");
+        }
+    }
 }
 
 // Global LVGL Chart Series Handles
@@ -70,8 +306,13 @@ void setup() {
     // Turn on LCD backlight to full brightness
     lcd_bl_pwm_bsp_init(LCD_PWM_MODE_255);
 
-    // Release 3-wire SPI pins after panel initialization
+    // Release 3-wire SPI pins after panel initialization. This frees GPIO0
+    // (button) and GPIO1/GPIO2, which the SD card needs - so both the button
+    // and the SD mount below MUST come after this call.
     release_st7701_spi_pins();
+
+    rec_button_init();
+    canlog_init();   // mounts SD, allocates PSRAM ring, starts writer task
 
     // Setup WiFi Radio for ESP-NOW (No WiFi association overhead)
     WiFi.disconnect(true, true);
@@ -129,6 +370,12 @@ void setup() {
             lv_obj_set_style_bg_color(objects.rpm_bar, lv_color_hex(0x00BFFF), LV_PART_INDICATOR);
         }
 
+        // Recording status, top-right. Built here rather than in EEZ Studio
+        // so regenerating the UI cannot silently drop it.
+        // Recording status now lives in the EEZ-authored status_label /
+        // warning_label (montserrat_20, far more legible at a glance than the
+        // 14px corner label this replaces), so nothing is created here.
+
         lvgl_port_unlock();
     }
 
@@ -136,11 +383,62 @@ void setup() {
     esp_wifi_set_ps(WIFI_PS_NONE);
     if (esp_now_init() == ESP_OK) {
         esp_now_register_recv_cb(OnDataRecv);
+
+        // This node also TRANSMITS now (arming the gateway's log stream), so
+        // it needs a peer - receiving alone never required one.
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, broadcast_mac, 6);
+        peer.channel = 0;    // follow the current radio channel
+        peer.encrypt = false;
+        if (esp_now_add_peer(&peer) != ESP_OK) {
+            Serial.println("[ESP-NOW] Failed to add broadcast peer - cannot arm gateway!");
+        }
     }
 }
 
 void loop() {
     uint32_t now = millis();
+#if REC_BUTTON_DEBUG
+    {
+        static uint32_t prev = 0, acc = 0, n = 0;
+        if (prev) {
+            uint32_t d = now - prev;
+            acc += d; n++;
+            if (d > dbg_loop_max) dbg_loop_max = d;
+            if (n >= 20) { dbg_loop_avg = acc / n; acc = 0; n = 0; }
+        }
+        prev = now;
+    }
+#endif
+
+    // Record button: polled every pass (not just on the 20 Hz UI tick) so a
+    // short press is never missed.
+    uint32_t _t0 = millis();
+    rec_button_poll(now);
+    uint32_t _t1 = millis();
+    canlog_tick(now);     // auto-closes the file if the gateway goes away
+    node_cmd_tick(now);   // keeps the gateway armed while recording
+    uint32_t _t2 = millis();
+    dbg_t_btn  = _t1 - _t0;
+    dbg_t_tick = _t2 - _t1;
+#if REC_BUTTON_DEBUG
+    {
+        static uint32_t hb = 0;
+        if (now >= hb) {
+            hb = now + 2000;
+            Serial.printf("[BTN] presses=%lu toggles=%lu ok=%lu fail=%lu "
+                          "state=%d file=%04u sd=%s tlm=%lu clog=%lu tx=%lu txfail=%lu(%d) loop=%lums\n",
+                          (unsigned long)dbg_presses, (unsigned long)dbg_toggles,
+                          (unsigned long)dbg_start_ok, (unsigned long)dbg_start_fail,
+                          (int)canlog_state(), (unsigned)canlog_file_index(),
+                          sdcard_status_str(),
+                          (unsigned long)pkt_count, (unsigned long)canlog_packets_rx(),
+                          (unsigned long)dbg_cmd_sent, (unsigned long)dbg_cmd_fail,
+                          dbg_cmd_err, (unsigned long)dbg_loop_avg);
+            dbg_loop_max = 0;
+        }
+    }
+#endif
 
     // Link Supervision & Demo Mode Generation
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
@@ -178,8 +476,11 @@ static uint16_t speed_buf_idx = 0;
 
     if (now - last_ui_update >= 50) {
         last_ui_update = now;
+        uint32_t _u0 = millis();
 
+        uint32_t _l0 = millis();
         if (lvgl_port_lock(10)) {
+            dbg_t_lock = millis() - _l0;
             // Chart feed with dynamic speed autoscale (visible 10s window max + 10 km/h padding, baseline 60 km/h)
             if (objects.history_chart && ser_throttle && ser_brake && ser_speed) {
                 uint16_t spd_kmh = active_pkt.speed_kmh_x10 / 10;
@@ -226,9 +527,12 @@ static uint16_t speed_buf_idx = 0;
                 prev_rpm = rpm_clamped;
             }
 
+            rec_label_update();
+
             ui_tick();
             lvgl_port_unlock();
         }
+        dbg_t_ui = millis() - _u0;
     }
 
     delay(20); // Let LVGL task run uncontested between updates

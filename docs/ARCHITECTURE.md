@@ -137,3 +137,35 @@ removal doesn't resolve it either.
 * **Node 4:** `esp32-gauge-147.local` (Waveshare ESP32-C6-LCD-1.47 — Universal Telemetry Display, Touch or Non-Touch TBD)
 * **Node 5:** `esp32-oled.local` (Generic ESP32-S3 + I2C OLED — Universal Gauge / Shift Light)
 * **Node 6:** `esp32-heltec-relay.local` (Heltec Meshtastic LoRa Bridge to Home Assistant)
+
+## 6. Display node UI sources (EEZ Studio)
+
+The LVGL UIs are designed in EEZ Studio and **exported into** the firmware
+trees. The generated `src/ui/` directories are build artefacts — editing them
+by hand is lost on the next export. Edit the `.eez-project` and re-export.
+
+| Node | EEZ project |
+|---|---|
+| `esp-rectangular-314` | `/Users/kickoff_laptop/eez-projects/esp32-s3-lcd-3.16 gauges/esp32-s3-lcd-3.16 gauges.eez-project` |
+| `xiao-round-gauge` | `firmware/display-nodes/xiao-round-gauge/eez-template/xiao_round_gauge.eez-project` (in-repo) |
+
+The rectangular node's project lives **outside this repository**, so it is not
+version-controlled with the firmware that consumes it. Keep that in mind before
+relying on `git` to recover a UI change.
+
+### Two gotchas that cost time
+
+- **Include path.** EEZ exports `#include <lvgl/lvgl.h>`, not `<lvgl.h>`, so
+  the node's `platformio.ini` needs
+  `-I ${PROJECT_DIR}/.pio/libdeps/esp-rectangular-314` or the build fails on
+  the generated files.
+- **Fonts must be enabled.** EEZ labels can reference a font that
+  `lv_conf.h` has switched off (we hit `LV_FONT_MONTSERRAT_20 0`). The symptom
+  is a link error or blank text, not an obvious font warning.
+- **Recolour markup is not a colour.** Labels driven from `main.cpp` set their
+  colour with `lv_obj_set_style_text_color()`; `#RRGGBB ...#` markup left text
+  invisible against the dark background under the LIGHT theme.
+
+`objects.status_label` and `objects.warning_label` are the two single-line
+labels reserved for firmware messages (SD state, record status). Firmware
+leaves them empty when it has nothing to say.
