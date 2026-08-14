@@ -89,6 +89,13 @@ static inline bool canlog_active() {
 
 static volatile OperationalMode current_mode = MODE_TELEMETRY;
 static volatile bool demo_mode = false;
+// Synthetic RAW-frame injector for bench-testing the SD recorder without a
+// car. demo_mode only fakes the decoded snapshot, so it exercises none of the
+// ring -> batch -> ESP-NOW -> SD path; two on-car bugs reached the vehicle
+// because that path had never been driven on a desk. Payload carries a
+// 32-bit sequence number so the host decoder can prove exact losslessness.
+static volatile bool     logtest_mode = false;
+static volatile uint32_t logtest_seq  = 0;
 #if ESPDASH_GATEWAY_WIFI
 static volatile bool ota_in_progress = false;
 #endif
@@ -310,13 +317,23 @@ static void process_cmd_string(String cmd) {
     } else if (cmd == "LOG:OFF" || cmd == "LOG_OFF" || cmd == "LOG:0") {
         canlog_manual = false;
         broadcast_line("[LOG] CAN log streaming DISABLED\n");
+    } else if (cmd == "LOGTEST:ON" || cmd == "LOGTEST:1") {
+        logtest_seq = 0;
+        logtest_mode = true;
+        broadcast_line("[LOGTEST] synthetic 1400 fps injector ENABLED (needs LOG:ON or a node)\n");
+    } else if (cmd == "LOGTEST:OFF" || cmd == "LOGTEST:0") {
+        logtest_mode = false;
+        char b[64];
+        snprintf(b, sizeof(b), "[LOGTEST] disabled after %lu frames\n", (unsigned long)logtest_seq);
+        broadcast_line(b);
     } else if (cmd == "STATS") {
-        char buf[220];
+        char buf[256];
 #if ESPDASH_GATEWAY_WIFI
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
-                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu\n",
+                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu "
+                 "injected:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -327,7 +344,10 @@ static void process_cmd_string(String cmd) {
                  canlog_active() ? "on" : "off",
                  (unsigned long)canlog_batches_sent,
                  (unsigned long)canlog_frames_sent,
-                 (unsigned long)canlog_send_fail);
+                 (unsigned long)canlog_send_fail,
+                 (unsigned long)espnow_rx_any,
+                 (unsigned long)espnow_rx_cmd,
+                 (unsigned long)logtest_seq);
 #else
         // No wifi_fallback field: with no Wi-Fi station ever attempted,
         // there's no connection to fall back from. espnow_send_fail is still
@@ -336,7 +356,8 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu "
-                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu\n",
+                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu "
+                 "injected:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -348,7 +369,8 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)canlog_frames_sent,
                  (unsigned long)canlog_send_fail,
                  (unsigned long)espnow_rx_any,
-                 (unsigned long)espnow_rx_cmd);
+                 (unsigned long)espnow_rx_cmd,
+                 (unsigned long)logtest_seq);
 #endif
         broadcast_line(buf);
     }
@@ -439,6 +461,38 @@ static void canRxTask(void *arg) {
             memcpy(s.data, f.data, 8);
             ring_push(&s);
         }
+    }
+}
+
+// Pushes synthetic frames at ~1400 fps (the measured real bus rate) using a
+// spread of genuine Honda IDs, so ID-table indexing and variable DLC are
+// exercised too. Frame N carries seq=N big-endian in data[0..3]; the decoder
+// then verifies received+dropped == sent with no gaps.
+static void inject_test_frames(uint32_t now) {
+    static const uint16_t ids[]  = {0x158,0x1D0,0x156,0x1A4,0x188,0x21E,0x17C,0x191,0x309,0x324};
+    static const uint8_t  dlcs[] = {8,8,5,8,8,8,8,7,8,8};
+    static uint32_t last = 0;
+    if (last == 0) last = now;
+    uint32_t elapsed = now - last;
+    if (elapsed == 0) return;
+    last = now;
+    // 1400 fps, capped so a long scheduling gap can't dump a huge burst.
+    uint32_t n = (elapsed * 1400) / 1000;
+    if (n > 128) n = 128;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t k = logtest_seq % (sizeof(ids)/sizeof(ids[0]));
+        RawSlot s;
+        s.ms  = now;
+        s.id  = ids[k];
+        s.rtr = 0;
+        s.dlc = dlcs[k];
+        memset(s.data, 0, 8);
+        s.data[0] = (uint8_t)(logtest_seq >> 24);
+        s.data[1] = (uint8_t)(logtest_seq >> 16);
+        s.data[2] = (uint8_t)(logtest_seq >> 8);
+        s.data[3] = (uint8_t)(logtest_seq);
+        ring_push(&s);
+        logtest_seq++;
     }
 }
 
@@ -686,6 +740,8 @@ static void publishTask(void *arg) {
         // batcher. A frame is popped exactly once and fanned out, so enabling
         // the recorder never steals frames from a USB capture running at the
         // same time.
+        if (logtest_mode && canlog_active()) inject_test_frames(now);
+
         int budget = 64;
         RawSlot s;
         bool serial_raw = (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL);
