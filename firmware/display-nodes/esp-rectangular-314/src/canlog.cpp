@@ -178,7 +178,9 @@ static void sdWriteTask(void *arg) {
 
         size_t wrote = fwrite(block, 1, n, s_file);
         if (wrote != n) {
+            // Most likely the card was pulled mid-recording, or it is failing.
             Serial.println("[CANLOG] write failed - stopping");
+            sdcard_set_status(SD_STATUS_WRITE_FAIL);
             s_state = CANLOG_ERROR;
             continue;
         }
@@ -210,7 +212,10 @@ void canlog_init(void) {
         Serial.println("[CANLOG] PSRAM alloc failed, using 32KB internal buffer");
     }
 
-    sdcard_init();
+    if (sdcard_init() == ESP_OK) {
+        // Prove the card actually retains data before trusting a drive to it.
+        sdcard_selftest();
+    }
 
     xTaskCreatePinnedToCore(sdWriteTask, "sdWrite", 4096, NULL, 2, NULL, 0);
     Serial.printf("[CANLOG] ready (ring %u KB, SD %s)\n",
@@ -241,6 +246,17 @@ bool canlog_start(void) {
             return false;
         }
     }
+    // Refuse up front rather than dying mid-drive: at ~57 MB/hr a nearly
+    // full card would fail somewhere down the road, where it cannot be fixed.
+    uint32_t freemb = sdcard_free_mb();
+    if (freemb < SDCARD_MIN_FREE_MB) {
+        Serial.printf("[CANLOG] only %lu MB free, need %u - refusing to start\n",
+                      (unsigned long)freemb, (unsigned)SDCARD_MIN_FREE_MB);
+        sdcard_set_status(SD_STATUS_FULL);
+        s_state = CANLOG_ERROR;
+        return false;
+    }
+
     if (!next_filename(s_filename, sizeof(s_filename))) {
         s_state = CANLOG_ERROR;
         return false;
@@ -248,6 +264,7 @@ bool canlog_start(void) {
     s_file = fopen(s_filename, "wb");
     if (!s_file) {
         Serial.printf("[CANLOG] fopen failed: %s\n", s_filename);
+        sdcard_set_status(SD_STATUS_WRITE_FAIL);
         s_state = CANLOG_ERROR;
         return false;
     }
@@ -261,6 +278,7 @@ bool canlog_start(void) {
     s_have_seq = false;
     s_start_ms = millis();
     s_last_rx_ms = s_start_ms;
+    sdcard_set_status(SD_STATUS_OK);   // clear any stale error from a past attempt
     s_state = CANLOG_RECORDING;
 
     Serial.printf("[CANLOG] recording -> %s\n", s_filename);

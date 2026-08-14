@@ -18,6 +18,7 @@
 #define SDMMC_D0_PIN  (gpio_num_t)42
 
 static sdmmc_card_t *s_card = NULL;
+static SdStatus      s_status = SD_STATUS_NO_CARD;
 
 esp_err_t sdcard_init(void) {
     if (s_card) return ESP_OK;
@@ -47,13 +48,90 @@ esp_err_t sdcard_init(void) {
                                             &mount_config, &s_card);
     if (err != ESP_OK) {
         s_card = NULL;
-        Serial.printf("[SD] mount failed: %s\n", esp_err_to_name(err));
+        // esp_vfs_fat_sdmmc_mount returns ESP_FAIL specifically when the card
+        // talked to us but held no mountable FAT volume, and a transport-level
+        // error (timeout / not found) when card init itself failed. That
+        // distinction is the difference between "insert a card" and "this card
+        // needs reformatting to FAT32", which is worth surfacing: any card
+        // larger than 32 GB is exFAT out of the box and will land here.
+        s_status = (err == ESP_FAIL) ? SD_STATUS_BAD_FORMAT : SD_STATUS_NO_CARD;
+        Serial.printf("[SD] mount failed: %s (%s)\n",
+                      esp_err_to_name(err), sdcard_status_str());
+        if (s_status == SD_STATUS_BAD_FORMAT) {
+            Serial.println("[SD] card detected but no FAT volume - reformat as "
+                           "FAT32 (exFAT and unformatted cards are not supported)");
+        }
         return err;
     }
 
-    Serial.printf("[SD] mounted: %s, %lu MB\n",
-                  s_card->cid.name, (unsigned long)sdcard_capacity_mb());
+    s_status = SD_STATUS_OK;
+    Serial.printf("[SD] mounted: %s, %lu MB total, %lu MB free\n",
+                  s_card->cid.name,
+                  (unsigned long)sdcard_capacity_mb(),
+                  (unsigned long)sdcard_free_mb());
     return ESP_OK;
+}
+
+SdStatus sdcard_status(void) { return s_status; }
+
+void sdcard_set_status(SdStatus s) { s_status = s; }
+
+const char *sdcard_status_str(void) {
+    switch (s_status) {
+        case SD_STATUS_OK:         return "OK";
+        case SD_STATUS_NO_CARD:    return "NO CARD";
+        case SD_STATUS_BAD_FORMAT: return "FORMAT FAT32";
+        case SD_STATUS_FULL:       return "CARD FULL";
+        case SD_STATUS_WRITE_FAIL: return "WRITE FAIL";
+    }
+    return "?";
+}
+
+bool sdcard_selftest(void) {
+    if (!s_card) return false;
+
+    const char *path = SDCARD_MOUNT_POINT "/.espdash_test";
+    static const char pattern[] = "espDash SD self-test 0123456789";
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        Serial.println("[SD] self-test: cannot create file");
+        s_status = SD_STATUS_WRITE_FAIL;
+        return false;
+    }
+    size_t wrote = fwrite(pattern, 1, sizeof(pattern), f);
+    // fflush+fsync before reading back, otherwise a successful compare could
+    // be served from the stdio buffer and prove nothing about the card.
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    if (wrote != sizeof(pattern)) {
+        Serial.println("[SD] self-test: short write");
+        s_status = SD_STATUS_WRITE_FAIL;
+        remove(path);
+        return false;
+    }
+
+    char back[sizeof(pattern)] = {0};
+    f = fopen(path, "rb");
+    if (!f) {
+        Serial.println("[SD] self-test: cannot reopen");
+        s_status = SD_STATUS_WRITE_FAIL;
+        return false;
+    }
+    size_t got = fread(back, 1, sizeof(back), f);
+    fclose(f);
+    remove(path);
+
+    if (got != sizeof(pattern) || memcmp(back, pattern, sizeof(pattern)) != 0) {
+        Serial.println("[SD] self-test: READ-BACK MISMATCH - card is failing or counterfeit");
+        s_status = SD_STATUS_WRITE_FAIL;
+        return false;
+    }
+
+    Serial.println("[SD] self-test passed");
+    return true;
 }
 
 bool sdcard_is_mounted(void) {

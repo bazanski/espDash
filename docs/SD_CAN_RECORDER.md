@@ -71,13 +71,40 @@ wrong.
 
 ## Reading the indicators
 
-| Display | Meaning |
-|---|---|
-| `REC 1:23  4MB` | Recording normally |
-| `REC 1:23  !57` | Recording, but 57 frames were dropped — see below |
-| `SD ERROR` | No card, mount failed, or a write failed |
-| green `1234MB OK` | Idle and fully flushed — **safe to pull the card or cut power** |
-| dim `1234MB` | Idle, but something is still being written out |
+| Display | Meaning | Fix |
+|---|---|---|
+| `REC 0003 1:23  4MB` | Recording normally (file `canlog_0003.bin`) | — |
+| `REC 0003 1:23  !57` | Recording, but 57 frames were dropped | see drop counters below |
+| green `1234MB OK` | Idle and fully flushed — **safe to pull the card or cut power** | — |
+| dim `1234MB` | Idle, still flushing | wait for green |
+| `NO CARD` | Card absent, unseated, or wiring fault | reseat the card |
+| `FORMAT FAT32` | Card present but no mountable FAT volume | **reformat as FAT32** |
+| `CARD FULL` | Under 64 MB free | free space or swap cards |
+| `WRITE FAIL` | Write or read-back failed | card pulled mid-write, or failing/counterfeit card |
+
+## Card compatibility
+
+**FAT32 only.** ESP-IDF mounts FAT12/16/32; exFAT is not enabled. **Any card
+over 32 GB is exFAT out of the box** and will refuse to mount — this is the
+single most likely reason a brand-new card "doesn't work". The display says
+`FORMAT FAT32` rather than a generic error precisely because that case is
+common and the fix is not obvious.
+
+A 32 GB FAT32 card holds roughly 9 hours of recording (~57 MB/hr).
+
+**The card is never reformatted automatically** (`format_if_mount_failed =
+false`) — wiping a card that happens to contain something else would be a
+poor trade for convenience.
+
+**Self-test at boot.** After mounting, a small file is written, read back,
+compared and deleted. Mounting only proves the FAT is *readable*; failing and
+counterfeit cards routinely mount fine and then silently discard writes.
+Catching that at boot beats discovering it after a drive. Look for
+`[SD] self-test passed` on serial.
+
+**Free space is checked before starting**, not during. Starting a drive on a
+nearly-full card and failing 10 minutes in is worse than refusing up front,
+where it can still be fixed.
 
 `STATS` on the gateway reports the sending side:
 `log:on batches:1234 logframes:22000 logfail:0`.

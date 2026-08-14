@@ -175,7 +175,12 @@ static void rec_label_update(void) {
                      (unsigned long)(canlog_bytes_written() / (1024 * 1024)));
         }
     } else if (st == CANLOG_ERROR) {
-        snprintf(buf, sizeof(buf), "#ffa000 SD ERROR#");
+        // Name the actual cause. This gets read in a car with no serial
+        // monitor attached, where "SD ERROR" alone leaves you guessing
+        // between a missing card, an exFAT card needing a reformat, and a
+        // full one - each with a completely different fix.
+        snprintf(buf, sizeof(buf), "#ffa000 " LV_SYMBOL_WARNING " %s#",
+                 sdcard_status_str());
     } else if (canlog_safe_to_remove()) {
         // Green rather than grey: this is an explicit "everything is on the
         // card, you can pull it or cut power" signal, not just an idle state.
