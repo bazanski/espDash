@@ -153,23 +153,32 @@ static void rec_button_poll(uint32_t now) {
 // Red REC + elapsed + free space while recording; dim when idle; amber on
 // error. Created here rather than in EEZ so the generated UI can be
 // regenerated without losing it.
+// Colour is applied with an explicit style rather than LVGL's "#rrggbb ...#"
+// recolor markup. Recolor only tints the span between the markers and leaves
+// the rest at the theme default - and this build runs the LIGHT theme
+// (LV_THEME_DEFAULT_DARK 0) on a near-black screen background (0x0f111a), so
+// any un-tinted text would be dark-on-dark and effectively invisible. There
+// are no other labels in the EEZ UI, so nothing had exercised that default
+// before. Styling the whole label per state is both correct and simpler.
 static void rec_label_update(void) {
     if (!rec_label) return;
     char buf[64];
     CanLogState st = canlog_state();
+    uint32_t colour;
 
     if (st == CANLOG_RECORDING) {
         uint32_t sec = canlog_elapsed_ms() / 1000;
         uint32_t drops = canlog_dropped() + canlog_gw_dropped();
+        colour = drops ? 0xffa000 : 0xff4040;   // amber if anything was lost
         // File number is shown throughout so you can note which recording
         // corresponds to what you were doing at the time.
         if (drops) {
-            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %04u  %lu:%02lu  !%lu",
+            snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  !%lu",
                      (unsigned)canlog_file_index(),
                      (unsigned long)(sec / 60), (unsigned long)(sec % 60),
                      (unsigned long)drops);
         } else {
-            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %04u  %lu:%02lu  %luMB",
+            snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %luMB",
                      (unsigned)canlog_file_index(),
                      (unsigned long)(sec / 60), (unsigned long)(sec % 60),
                      (unsigned long)(canlog_bytes_written() / (1024 * 1024)));
@@ -179,17 +188,21 @@ static void rec_label_update(void) {
         // monitor attached, where "SD ERROR" alone leaves you guessing
         // between a missing card, an exFAT card needing a reformat, and a
         // full one - each with a completely different fix.
-        snprintf(buf, sizeof(buf), "#ffa000 " LV_SYMBOL_WARNING " %s#",
-                 sdcard_status_str());
+        colour = 0xffa000;
+        snprintf(buf, sizeof(buf), LV_SYMBOL_WARNING " %s", sdcard_status_str());
     } else if (canlog_safe_to_remove()) {
-        // Green rather than grey: this is an explicit "everything is on the
-        // card, you can pull it or cut power" signal, not just an idle state.
-        snprintf(buf, sizeof(buf), "#40a060 " LV_SYMBOL_SD_CARD " %luMB OK#",
+        // Green rather than grey: an explicit "everything is on the card, you
+        // can pull it or cut power" signal, not just an idle state.
+        colour = 0x40c070;
+        snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB OK",
                  (unsigned long)sdcard_free_mb());
     } else {
-        snprintf(buf, sizeof(buf), "#404858 " LV_SYMBOL_SD_CARD " %luMB#",
+        colour = 0x8892a4;   // readable grey, not the theme's dark default
+        snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB",
                  (unsigned long)sdcard_free_mb());
     }
+
+    lv_obj_set_style_text_color(rec_label, lv_color_hex(colour), LV_PART_MAIN);
     lv_label_set_text(rec_label, buf);
 }
 
@@ -281,11 +294,15 @@ void setup() {
 
         // Recording status, top-right. Built here rather than in EEZ Studio
         // so regenerating the UI cannot silently drop it.
+        // Top strip (y 0..31) is free: the chart starts at y=32 and the bars
+        // at x=28/55/82 also start at y=32, so a right-aligned label here
+        // cannot overlap anything. (left_tiers sits at y=428, off a 320-tall
+        // screen, so it is not a factor.)
         if (objects.main) {
             rec_label = lv_label_create(objects.main);
-            lv_label_set_recolor(rec_label, true);
             lv_obj_align(rec_label, LV_ALIGN_TOP_RIGHT, -8, 6);
-            lv_label_set_text(rec_label, "#404858 --#");
+            lv_obj_set_style_text_color(rec_label, lv_color_hex(0x8892a4), LV_PART_MAIN);
+            lv_label_set_text(rec_label, LV_SYMBOL_SD_CARD " --");
         }
 
         lvgl_port_unlock();
