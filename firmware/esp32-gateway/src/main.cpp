@@ -72,7 +72,20 @@ enum OperationalMode {
 // recorder node is orthogonal to what the USB/serial side is doing, so a
 // capture can run while the dashboard is in any mode (or nothing is attached
 // at all, which is the whole point - recording a drive without a laptop).
-static volatile bool canlog_streaming = false;
+//
+// Two independent sources can ask for streaming:
+//   manual  - LOG:ON over serial, latched until LOG:OFF. For bench work.
+//   node    - a recorder node repeatedly advertising that it wants data.
+//             Expires on its own if the adverts stop, so an unplugged node
+//             never leaves the gateway transmitting into the void.
+// Effective state is the OR of the two.
+static volatile bool     canlog_manual = false;
+static volatile bool     canlog_node_req = false;
+static volatile uint32_t canlog_node_req_ms = 0;
+
+static inline bool canlog_active() {
+    return canlog_manual || canlog_node_req;
+}
 
 static volatile OperationalMode current_mode = MODE_TELEMETRY;
 static volatile bool demo_mode = false;
@@ -290,10 +303,10 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf), "[MODE] CURRENT:%s | DEMO:%s\n", m, demo_mode ? "ON" : "OFF");
         broadcast_line(buf);
     } else if (cmd == "LOG:ON" || cmd == "LOG_ON" || cmd == "LOG:1") {
-        canlog_streaming = true;
+        canlog_manual = true;
         broadcast_line("[LOG] CAN log streaming ENABLED (ESP-NOW -> SD recorder)\n");
     } else if (cmd == "LOG:OFF" || cmd == "LOG_OFF" || cmd == "LOG:0") {
-        canlog_streaming = false;
+        canlog_manual = false;
         broadcast_line("[LOG] CAN log streaming DISABLED\n");
     } else if (cmd == "STATS") {
         char buf[220];
@@ -309,7 +322,7 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)tx_truncated,
                  (unsigned long)espnow_send_fail,
                  wifi_fallback_engaged ? "yes" : "no",
-                 canlog_streaming ? "on" : "off",
+                 canlog_active() ? "on" : "off",
                  (unsigned long)canlog_batches_sent,
                  (unsigned long)canlog_frames_sent,
                  (unsigned long)canlog_send_fail);
@@ -328,7 +341,7 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)twai_queue_full_events,
                  (unsigned long)tx_truncated,
                  (unsigned long)espnow_send_fail,
-                 canlog_streaming ? "on" : "off",
+                 canlog_active() ? "on" : "off",
                  (unsigned long)canlog_batches_sent,
                  (unsigned long)canlog_frames_sent,
                  (unsigned long)canlog_send_fail);
@@ -636,13 +649,21 @@ static void publishTask(void *arg) {
                 snprintf(raw_buf + p, sizeof(raw_buf) - p, "\n");
                 broadcast_line(raw_buf);
             }
-            if (canlog_streaming) {
+            if (canlog_active()) {
                 canlog_add_frame(&s);
             }
         }
         // Flush a partial batch if it has been waiting too long, so the tail
         // of a capture is never stranded when the bus goes quiet.
-        if (canlog_streaming) canlog_flush_if_due(now);
+        // Expire a node request that has stopped arriving: the recorder was
+        // switched off, unplugged, or drove out of range. Without this the
+        // gateway would keep transmitting into the void.
+        if (canlog_node_req && (now - canlog_node_req_ms) > ESPDASH_NODE_CMD_TIMEOUT_MS) {
+            canlog_node_req = false;
+            canlog_send_batch();   // don't strand a partial batch
+        }
+
+        if (canlog_active()) canlog_flush_if_due(now);
 
         // ---- 4. Snapshot -------------------------------------------------
         CanDecodeState snap;
@@ -749,11 +770,32 @@ static void publishTask(void *arg) {
 // =========================================================================
 // ESP-NOW
 // =========================================================================
+// Upstream messages from recorder nodes. Runs in the Wi-Fi task context, so
+// it only touches a couple of volatiles and returns - no logging, no I/O.
+#if defined(ESP_IDF_VERSION_MAJOR) && ESP_IDF_VERSION_MAJOR >= 5
+static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+#else
+static void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+#endif
+    const EspDashNodeCmd *cmd = espdash_parse_nodecmd(data, len);
+    if (!cmd) return;
+
+    if (cmd->want_canlog) {
+        canlog_node_req = true;
+        canlog_node_req_ms = millis();
+    } else {
+        // An explicit "stop" takes effect immediately rather than waiting
+        // for the timeout, so releasing the button feels instant.
+        canlog_node_req = false;
+    }
+}
+
 static void init_esp_now() {
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESP-NOW] Initialization failed!");
         return;
     }
+    esp_now_register_recv_cb(onEspNowRecv);
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, broadcast_mac, 6);
     peer.channel = 0;   // follow the station channel

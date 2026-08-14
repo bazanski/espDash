@@ -15,18 +15,44 @@ driving that was going unrecorded.
 
 ## Using it
 
+**No laptop needed. One button.**
+
 1. **Insert a FAT32 SD card** into the 3.14 node.
-2. **Enable streaming on the gateway** — over USB serial, send `LOG:ON`
-   (`LOG:OFF` to stop). This is independent of `MODE:PLOT/RAW/DUAL`, so a
-   dashboard session and a recording can run at the same time.
-3. **Press BOOT on the node** to start recording. The top-right of the
-   display shows a red `REC` with elapsed time and MB written.
-4. **Press BOOT again** to stop and close the file cleanly.
-5. **Long-press BOOT (2 s)** to stop *and* unmount, so the card can be pulled
+2. **Press BOOT on the node** — it arms the gateway over ESP-NOW *and* starts
+   recording. The top-right of the display shows a red `REC` with the file
+   number, elapsed time and MB written.
+3. **Press BOOT again** to stop: the file is closed and the gateway stops
+   streaming.
+4. **Long-press BOOT (2 s)** to stop *and* unmount, so the card can be pulled
    safely.
 
-Files land as `/sdcard/canlog_0000.bin`, `canlog_0001.bin`, … (no RTC on the
-node, so the index is a counter, not a timestamp).
+Repeat as many times as you like in one drive — each press/press pair makes a
+new numbered file.
+
+`LOG:ON` / `LOG:OFF` over USB serial still work as a manual override for
+bench testing. The two are independent: the gateway streams if *either* the
+serial latch is on or a node is asking.
+
+### Several recordings per drive
+
+Files are `/sdcard/canlog_0000.bin`, `canlog_0001.bin`, … The node picks the
+first unused index, so recordings never overwrite each other, even across
+power cycles.
+
+**The file number is shown on screen while recording**, so you can note what
+you were doing ("0003 was the fill-up").
+
+On stop, a line is appended to `/sdcard/canlog_index.csv`:
+
+```
+file,start_uptime_ms,duration_s,frames,bytes,node_dropped,gw_dropped,seq_gaps
+canlog_0000.bin,184333,109,152896,1724000,0,0,0
+```
+
+There's no RTC on this board, so `start_uptime_ms` (gateway uptime at the
+start of the recording) is the closest thing to a clock — it orders the
+recordings and shows how far into the drive each one began. Inventing a
+wall-clock timestamp would be worse than an honest relative one.
 
 ## Decoding
 
@@ -99,6 +125,22 @@ isn't telemetry, deliberately: relaxing it would let a display node render a
 log batch as telemetry. Nodes that don't record simply never call the new
 parser and ignore type 4 harmlessly.
 
+**Arming is a repeated state advertisement, not an on/off command.** The node
+broadcasts "I want raw CAN" (`ESPDASH_MSG_NODE_CMD = 6`) twice a second while
+recording, and the gateway holds that state only while requests keep
+arriving, forgetting after 3 s. Edge-triggered commands would be fragile over
+fire-and-forget ESP-NOW: one dropped "start" means recording an empty file,
+one dropped "stop" means the gateway transmits forever. Repeating makes it
+self-healing in every direction:
+
+- lost packet → the next one lands ~500 ms later
+- node switched off or out of range → gateway stops by itself, no wasted airtime
+- gateway rebooted mid-recording → the node's next advert re-arms it automatically
+
+This is also the first **upstream** message in the project (everything else
+flows gateway → nodes), so the gateway gained a receive callback and the node
+gained a broadcast peer.
+
 ## Not yet verified on hardware
 
 Everything above is bench-verified in software (byte-exact round-trip, all
@@ -107,9 +149,11 @@ builds, existing test suites). Still untested against real hardware:
 - SD mount on the physical card (pin config is from the vendor example for
   this exact board, but unverified on this unit)
 - Whether the BOOT switch is physically wired to GPIO0 on this board — if
-  not, the trigger falls back to a serial command with no other design change
+  not, the trigger falls back to `LOG:ON` over serial with no other design change
 - Sustained ~78 packets/s over ESP-NOW while 20 Hz telemetry shares the radio
 - Whether display gauges stay smooth during recording
+- The upstream node→gateway path (new direction; the gateway had never
+  received an ESP-NOW packet before this)
 
 If the link can't sustain full rate, the fallback is an ID allow-list
 (logging only the ~11 decoded IDs plus the unmapped candidates cuts the rate

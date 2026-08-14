@@ -40,6 +40,7 @@ bool canlog_start(void);   // opens a new file; false if SD unavailable
 void canlog_stop(void);    // flushes, closes, returns to IDLE
 
 CanLogState canlog_state(void);
+uint16_t    canlog_file_index(void);   // the N in canlog_NNNN.bin
 uint32_t    canlog_frames_written(void);
 uint32_t    canlog_bytes_written(void);
 uint32_t    canlog_elapsed_ms(void);

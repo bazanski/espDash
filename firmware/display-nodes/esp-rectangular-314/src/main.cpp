@@ -71,6 +71,55 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 // =========================================================================
 static lv_obj_t *rec_label = NULL;
 
+static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint16_t node_cmd_seq = 0;
+
+// Tell the gateway whether we want raw CAN streamed to us. Repeated rather
+// than edge-triggered: ESP-NOW is fire-and-forget, so a single lost "start"
+// would mean recording an empty file. See EspDashProto.h for the full
+// rationale - the gateway forgets us if these stop arriving, which is what
+// makes the link self-healing in both directions.
+static void send_node_cmd(bool want) {
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashNodeCmd)];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_NODE_CMD;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = sizeof(EspDashNodeCmd);
+    h->seq         = node_cmd_seq++;
+
+    EspDashNodeCmd *c = (EspDashNodeCmd *)(pkt + sizeof(EspDashHeader));
+    c->want_canlog = want ? 1 : 0;
+    c->node_id     = 1;          // esp-rectangular-314
+    c->reserved    = 0;
+
+    esp_now_send(broadcast_mac, pkt, sizeof(pkt));
+}
+
+// Re-advertise while recording; also send a few explicit stops on release so
+// the gateway reacts immediately instead of waiting out the timeout.
+static void node_cmd_tick(uint32_t now) {
+    static uint32_t last_send = 0;
+    static uint8_t  stop_bursts = 0;
+    static bool     was_recording = false;
+
+    bool recording = (canlog_state() == CANLOG_RECORDING);
+
+    if (was_recording && !recording) stop_bursts = 3;
+    was_recording = recording;
+
+    if (now - last_send < ESPDASH_NODE_CMD_INTERVAL_MS) return;
+    last_send = now;
+
+    if (recording) {
+        send_node_cmd(true);
+    } else if (stop_bursts) {
+        stop_bursts--;
+        send_node_cmd(false);
+    }
+}
+
 static void rec_button_init(void) {
     pinMode(REC_BUTTON_PIN, INPUT_PULLUP);
 }
@@ -133,12 +182,16 @@ static void rec_label_update(void) {
     if (st == CANLOG_RECORDING) {
         uint32_t sec = canlog_elapsed_ms() / 1000;
         uint32_t drops = canlog_dropped() + canlog_gw_dropped();
+        // File number is shown throughout so you can note which recording
+        // corresponds to what you were doing at the time.
         if (drops) {
-            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %lu:%02lu  !%lu",
+            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %04u  %lu:%02lu  !%lu",
+                     (unsigned)canlog_file_index(),
                      (unsigned long)(sec / 60), (unsigned long)(sec % 60),
                      (unsigned long)drops);
         } else {
-            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %lu:%02lu  %luMB",
+            snprintf(buf, sizeof(buf), "#ff4040 " LV_SYMBOL_STOP "# REC %04u  %lu:%02lu  %luMB",
+                     (unsigned)canlog_file_index(),
                      (unsigned long)(sec / 60), (unsigned long)(sec % 60),
                      (unsigned long)(canlog_bytes_written() / (1024 * 1024)));
         }
@@ -253,6 +306,16 @@ void setup() {
     esp_wifi_set_ps(WIFI_PS_NONE);
     if (esp_now_init() == ESP_OK) {
         esp_now_register_recv_cb(OnDataRecv);
+
+        // This node also TRANSMITS now (arming the gateway's log stream), so
+        // it needs a peer - receiving alone never required one.
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, broadcast_mac, 6);
+        peer.channel = 0;    // follow the current radio channel
+        peer.encrypt = false;
+        if (esp_now_add_peer(&peer) != ESP_OK) {
+            Serial.println("[ESP-NOW] Failed to add broadcast peer - cannot arm gateway!");
+        }
     }
 }
 
@@ -263,6 +326,7 @@ void loop() {
     // short press is never missed.
     rec_button_poll(now);
     rec_button_check_longpress(now);
+    node_cmd_tick(now);   // keeps the gateway armed while recording
 
     // Link Supervision & Demo Mode Generation
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);

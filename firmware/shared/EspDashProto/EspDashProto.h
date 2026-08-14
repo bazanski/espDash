@@ -47,7 +47,8 @@ enum {
     ESPDASH_MSG_NODE_STATUS = 2,  // reserved: node -> gateway heartbeat
     ESPDASH_MSG_IMU         = 3,  // reserved: GY-BNO08X orientation
     ESPDASH_MSG_CANLOG      = 4,  // batched raw CAN frames -> SD recorder
-    ESPDASH_MSG_CANLOG_IDS  = 5   // ID index table (makes a log self-describing)
+    ESPDASH_MSG_CANLOG_IDS  = 5,  // ID index table (makes a log self-describing)
+    ESPDASH_MSG_NODE_CMD    = 6   // node -> gateway request (first upstream msg)
 };
 
 typedef struct __attribute__((packed)) {
@@ -198,6 +199,45 @@ static inline const EspDashCanLogHdr *espdash_parse_canlog(const uint8_t *data, 
     if (out_len) *out_len = plen;
     if (out_seq) *out_seq = h->seq;
     return (const EspDashCanLogHdr *)(data + sizeof(EspDashHeader));
+}
+
+// =========================================================================
+// NODE -> GATEWAY COMMAND (msg_type 6)
+// =========================================================================
+// The first upstream message in this project; everything else flows gateway
+// -> nodes. It exists so the SD recorder can arm the gateway by itself, with
+// no laptop in the car.
+//
+// Deliberately a REPEATED STATE ADVERTISEMENT, not an edge-triggered
+// on/off command. ESP-NOW is fire-and-forget: a single dropped "start" would
+// mean recording an empty file, and a dropped "stop" would leave the gateway
+// transmitting forever. Instead the node repeats what it *wants* a few times
+// a second, and the gateway holds that state only while requests keep
+// arriving (see ESPDASH_NODE_CMD_TIMEOUT_MS). That makes the link
+// self-healing in every direction:
+//   - lost packet          -> next one lands ~500 ms later
+//   - node unplugged/off   -> gateway stops on its own, no wasted airtime
+//   - gateway rebooted     -> node's next advert re-arms it automatically
+#define ESPDASH_NODE_CMD_INTERVAL_MS 500   // node re-advertises this often
+#define ESPDASH_NODE_CMD_TIMEOUT_MS  3000  // gateway forgets after this long
+
+typedef struct __attribute__((packed)) {
+    uint8_t  want_canlog;  // 1 = please stream raw CAN, 0 = stop
+    uint8_t  node_id;      // which node is asking (room for several later)
+    uint16_t reserved;
+} EspDashNodeCmd;
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(EspDashNodeCmd) == 4, "node cmd must stay 4 bytes");
+#endif
+
+static inline const EspDashNodeCmd *espdash_parse_nodecmd(const uint8_t *data, int len) {
+    if (data == NULL || len < (int)(sizeof(EspDashHeader) + sizeof(EspDashNodeCmd))) return NULL;
+    const EspDashHeader *h = (const EspDashHeader *)data;
+    if (h->magic != ESPDASH_MAGIC) return NULL;
+    if (h->msg_type != ESPDASH_MSG_NODE_CMD) return NULL;
+    if (h->proto_major != ESPDASH_PROTO_MAJOR) return NULL;
+    return (const EspDashNodeCmd *)(data + sizeof(EspDashHeader));
 }
 
 // Same shape, for the ID table message.

@@ -45,6 +45,7 @@ static portMUX_TYPE s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile CanLogState s_state = CANLOG_IDLE;
 static FILE *s_file = NULL;
 static char  s_filename[48] = {0};
+static uint16_t s_file_index = 0;
 
 static volatile uint32_t s_frames = 0;
 static volatile uint32_t s_bytes = 0;
@@ -213,7 +214,10 @@ static bool next_filename(char *out, size_t outsz) {
     for (int i = 0; i < 9999; i++) {
         snprintf(out, outsz, "%s/canlog_%04d.bin", SDCARD_MOUNT_POINT, i);
         struct stat st;
-        if (stat(out, &st) != 0) return true;
+        if (stat(out, &st) != 0) {
+            s_file_index = (uint16_t)i;
+            return true;
+        }
     }
     return false;
 }
@@ -271,6 +275,28 @@ void canlog_stop(void) {
         fclose(s_file);
         s_file = NULL;
     }
+    // Append to a manifest so several recordings from one session stay
+    // tellable apart without opening each file. No RTC on this board, so
+    // the gateway uptime at start is the closest thing to a wall clock -
+    // it at least orders them and shows how far into the drive each began.
+    FILE *mf = fopen(SDCARD_MOUNT_POINT "/canlog_index.csv", "a");
+    if (mf) {
+        // Header only once, when the file is new (ftell==0 after append open).
+        if (ftell(mf) == 0) {
+            fprintf(mf, "file,start_uptime_ms,duration_s,frames,bytes,node_dropped,gw_dropped,seq_gaps\n");
+        }
+        fprintf(mf, "canlog_%04u.bin,%lu,%lu,%lu,%lu,%lu,%lu,%u\n",
+                (unsigned)s_file_index,
+                (unsigned long)s_start_ms,
+                (unsigned long)((millis() - s_start_ms) / 1000),
+                (unsigned long)s_frames,
+                (unsigned long)s_bytes,
+                (unsigned long)s_dropped,
+                (unsigned long)s_gw_dropped,
+                (unsigned)s_seq_gaps);
+        fclose(mf);
+    }
+
     Serial.printf("[CANLOG] stopped: %s, %lu frames, %lu KB, dropped %lu, gaps %u\n",
                   s_filename, (unsigned long)s_frames,
                   (unsigned long)(s_bytes / 1024),
@@ -278,6 +304,7 @@ void canlog_stop(void) {
 }
 
 CanLogState canlog_state(void)        { return s_state; }
+uint16_t    canlog_file_index(void)    { return s_file_index; }
 uint32_t    canlog_frames_written(void){ return s_frames; }
 uint32_t    canlog_bytes_written(void) { return s_bytes; }
 uint32_t    canlog_elapsed_ms(void)    { return s_state == CANLOG_RECORDING ? millis() - s_start_ms : 0; }
