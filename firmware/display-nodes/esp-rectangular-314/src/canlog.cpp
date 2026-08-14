@@ -63,6 +63,7 @@ static uint16_t s_last_seq = 0;
 static bool     s_have_seq = false;
 static uint32_t s_start_ms = 0;
 static volatile uint32_t s_last_rx_ms = 0;
+static volatile uint32_t s_pkts_rx = 0;
 
 static inline uint32_t ring_used(void) {
     uint32_t h = s_head, t = s_tail;
@@ -107,10 +108,14 @@ static void ring_write_record(uint8_t type, const uint8_t *payload, uint16_t len
 // ESP-NOW receive
 // =========================================================================
 void canlog_on_packet(const uint8_t *data, int len) {
-    if (s_state != CANLOG_RECORDING) return;
-
     uint16_t plen = 0, seq = 0;
     const EspDashCanLogHdr *ch = espdash_parse_canlog(data, len, &plen, &seq);
+
+    // Count first, gate second: observing the link while idle is the only way
+    // to tell "gateway not streaming" from "node not recording".
+    if (ch) s_pkts_rx++;
+    if (s_state != CANLOG_RECORDING) return;
+
     if (ch) {
         if (s_have_seq && seq != (uint16_t)(s_last_seq + 1)) {
             // Count actual packets missed, not just discontinuity events.
@@ -215,6 +220,10 @@ void canlog_init(void) {
     if (sdcard_init() == ESP_OK) {
         // Prove the card actually retains data before trusting a drive to it.
         sdcard_selftest();
+    } else {
+        // Report what is actually on the card rather than leaving the user to
+        // guess which of several formatting problems it is.
+        sdcard_diagnose();
     }
 
     xTaskCreatePinnedToCore(sdWriteTask, "sdWrite", 4096, NULL, 2, NULL, 0);
@@ -248,7 +257,7 @@ bool canlog_start(void) {
     }
     // Refuse up front rather than dying mid-drive: at ~57 MB/hr a nearly
     // full card would fail somewhere down the road, where it cannot be fixed.
-    uint32_t freemb = sdcard_free_mb();
+    uint32_t freemb = sdcard_free_mb_refresh();   // must be accurate, not cached
     if (freemb < SDCARD_MIN_FREE_MB) {
         Serial.printf("[CANLOG] only %lu MB free, need %u - refusing to start\n",
                       (unsigned long)freemb, (unsigned)SDCARD_MIN_FREE_MB);
@@ -298,11 +307,22 @@ void canlog_stop(void) {
     while (ring_used() > 0 && guard++ < 500) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    bool empty = (s_frames == 0);
     if (s_file) {
         fflush(s_file);
         fsync(fileno(s_file));
         fclose(s_file);
         s_file = NULL;
+    }
+    // A recording that captured nothing is not worth keeping: it happens
+    // whenever the button is pressed while the gateway is off or out of
+    // range, and leaving those behind fills the card with junk and makes the
+    // numbering useless for finding the drive you actually care about.
+    if (empty) {
+        remove(s_filename);
+        Serial.printf("[CANLOG] %s captured 0 frames - deleted\n", s_filename);
+        s_state = CANLOG_IDLE;
+        return;
     }
     // Append to a manifest so several recordings from one session stay
     // tellable apart without opening each file. No RTC on this board, so
@@ -334,7 +354,14 @@ void canlog_stop(void) {
 
 void canlog_tick(uint32_t now) {
     if (s_state != CANLOG_RECORDING) return;
-    if ((uint32_t)(now - s_last_rx_ms) > RX_TIMEOUT_MS) {
+    // Signed compare, deliberately. loop() samples `now` once at the top, but
+    // canlog_start() stamps s_last_rx_ms from a later millis() inside the same
+    // pass - so s_last_rx_ms is legitimately a few ms AHEAD of `now` on the
+    // first tick of a recording. Unsigned arithmetic turned that into ~4.29e9
+    // and auto-stopped the recording microseconds after it began. Signed also
+    // keeps the 49-day millis() rollover correct.
+    int32_t idle = (int32_t)(now - s_last_rx_ms);
+    if (idle > (int32_t)RX_TIMEOUT_MS) {
         Serial.println("[CANLOG] gateway silent - auto-stopping, file closed cleanly");
         canlog_stop();
     }
@@ -353,4 +380,5 @@ uint32_t    canlog_elapsed_ms(void)    { return s_state == CANLOG_RECORDING ? mi
 uint32_t    canlog_dropped(void)       { return s_dropped; }
 uint32_t    canlog_gw_dropped(void)    { return s_gw_dropped; }
 uint16_t    canlog_seq_gaps(void)      { return s_seq_gaps; }
+uint32_t    canlog_packets_rx(void)    { return s_pkts_rx; }
 const char *canlog_filename(void)      { return s_filename; }

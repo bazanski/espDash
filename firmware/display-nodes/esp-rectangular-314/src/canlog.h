@@ -56,6 +56,7 @@ uint32_t    canlog_elapsed_ms(void);
 uint32_t    canlog_dropped(void);      // ring overflows on this node
 uint32_t    canlog_gw_dropped(void);   // drops reported by the gateway
 uint16_t    canlog_seq_gaps(void);     // ESP-NOW packets lost in transit
+uint32_t    canlog_packets_rx(void);   // canlog packets seen, even when idle
 const char *canlog_filename(void);
 
 #ifdef __cplusplus

@@ -51,12 +51,24 @@ void        sdcard_set_status(SdStatus s);
 // away writes. Catching that at boot beats discovering it after a drive.
 bool sdcard_selftest(void);
 
+// Runs only when a mount fails. Re-initialises the card at the raw SDMMC
+// level and reads sector 0 to report what is actually on it - card identity
+// plus the real partition/filesystem type. "Reformat as FAT32" is a guess
+// until something has actually looked; this turns it into a fact, and says
+// so on the serial log.
+void sdcard_diagnose(void);
+
 // Capacity in MB, 0 if not mounted.
 uint32_t sdcard_capacity_mb(void);
 
-// Free space in MB, 0 if not mounted. Uses statvfs, which walks the FAT and
-// is slow (tens of ms) - call it once per second at most, never per write.
+// Free space in MB, 0 if not mounted. Cached (see sdcard_bsp.cpp): the
+// underlying FATFS f_getfree() walks the entire FAT and measured ~115 ms on
+// a 32 GB card, which is far too slow to call from a UI loop.
 uint32_t sdcard_free_mb(void);
+
+// Forces a fresh reading, bypassing the cache. Use where the number has to
+// be right rather than merely recent - e.g. the pre-recording space check.
+uint32_t sdcard_free_mb_refresh(void);
 
 #ifdef __cplusplus
 }

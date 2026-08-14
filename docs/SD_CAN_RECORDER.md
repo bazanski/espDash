@@ -183,21 +183,52 @@ This is also the first **upstream** message in the project (everything else
 flows gateway → nodes), so the gateway gained a receive callback and the node
 gained a broadcast peer.
 
-## Not yet verified on hardware
+## Hardware verification status
 
-Everything above is bench-verified in software (byte-exact round-trip, all
-builds, existing test suites). Still untested against real hardware:
+Verified on the physical units (gateway + esp-rectangular-314, bench, car off):
 
-- SD mount on the physical card (pin config is from the vendor example for
-  this exact board, but unverified on this unit)
-- Whether the BOOT switch is physically wired to GPIO0 on this board — if
-  not, the trigger falls back to `LOG:ON` over serial with no other design change
+- **SD mount and self-test** on the real card — `sd=OK`, write/readback/delete
+  passes. Card must be **FAT32 + MBR**; exFAT and GPT will not mount.
+- **BOOT is wired to GPIO0** on this board and works as the record trigger.
+  6 presses produced 6 toggles and 3 clean start/stop cycles.
+- **The upstream node→gateway path** (the new direction; the gateway had never
+  received an ESP-NOW packet before this): 27 commands sent, 27 received, 27
+  parsed — zero send failures, zero loss, zero parse rejects.
+- **Gateway→node telemetry keeps flowing** throughout, and the gateway
+  keepalive reaches the node while armed.
+
+Still untested, and only testable on a live bus:
+
 - Sustained ~78 packets/s over ESP-NOW while 20 Hz telemetry shares the radio
 - Whether display gauges stay smooth during recording
-- The upstream node→gateway path (new direction; the gateway had never
-  received an ESP-NOW packet before this)
+- End-to-end capture of real frames (every bench recording captured 0 frames,
+  because with the car off there is no bus traffic — see below)
 
 If the link can't sustain full rate, the fallback is an ID allow-list
 (logging only the ~11 decoded IDs plus the unmapped candidates cuts the rate
 ~3×), which still fully serves the fuel/throttle/ignition investigations that
 motivated this.
+
+### Why the file number does not always advance
+
+`canlog_stop()` deletes any recording that captured **0 frames**, so its index
+is reused by the next attempt. Pressing BOOT with the car off therefore
+produces `canlog_0034.bin` over and over rather than 34, 35, 36. This is
+intended — it keeps the card from filling with empty files and keeps the
+numbering meaningful for finding a real drive. A repeating number is a useful
+signal in itself: **nothing is arriving from the bus.**
+
+### Debug heartbeat
+
+`REC_BUTTON_DEBUG` (top of the node's `main.cpp`, currently `1`) prints a
+periodic one-liner:
+
+```
+[BTN] presses=6 toggles=6 ok=3 fail=0 state=0 file=0034 sd=OK tlm=3617 clog=11 tx=27 txfail=0(0) loop=108ms
+```
+
+`tx`/`txfail` are the node's `esp_now_send()` results and pair with the
+gateway's `rx_any`/`rx_cmd` in `STATS`. Together they separate "never
+transmitted" from "transmitted and lost" from "arrived but rejected by the
+parser" — a distinction that cost several debugging cycles to add. Leave this
+on until the first successful car capture.

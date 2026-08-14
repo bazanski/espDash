@@ -176,6 +176,8 @@ static volatile uint32_t tx_truncated = 0;
 static volatile uint32_t canlog_batches_sent = 0;
 static volatile uint32_t canlog_frames_sent = 0;
 static volatile uint32_t canlog_send_fail = 0;
+static volatile uint32_t espnow_rx_any = 0;   // any ESP-NOW packet received
+static volatile uint32_t espnow_rx_cmd = 0;   // parsed as a node command
 
 // USB CDC and TCP both accept short writes: write() returns how many bytes it
 // actually took, which is less than requested once the peer stops draining.
@@ -314,7 +316,7 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
-                 "log:%s batches:%lu logframes:%lu logfail:%lu\n",
+                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -334,7 +336,7 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu "
-                 "log:%s batches:%lu logframes:%lu logfail:%lu\n",
+                 "log:%s batches:%lu logframes:%lu logfail:%lu rx_any:%lu rx_cmd:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -344,7 +346,9 @@ static void process_cmd_string(String cmd) {
                  canlog_active() ? "on" : "off",
                  (unsigned long)canlog_batches_sent,
                  (unsigned long)canlog_frames_sent,
-                 (unsigned long)canlog_send_fail);
+                 (unsigned long)canlog_send_fail,
+                 (unsigned long)espnow_rx_any,
+                 (unsigned long)espnow_rx_cmd);
 #endif
         broadcast_line(buf);
     }
@@ -447,6 +451,7 @@ static void canRxTask(void *arg) {
 static uint16_t canlog_id_table[CANLOG_ID_TABLE_MAX];
 static uint8_t  canlog_id_count = 0;
 static uint32_t last_canlog_ids_send = 0;
+static uint32_t last_canlog_tx = 0;   // any canlog packet, for keepalive
 
 static uint8_t  canlog_buf[CANLOG_BATCH_MAX_BYTES];
 static uint16_t canlog_len = 0;       // bytes used in canlog_buf
@@ -491,6 +496,7 @@ static void canlog_send_batch() {
     if (esp_now_send(broadcast_mac, pkt, total) == ESP_OK) {
         canlog_batches_sent++;
         canlog_frames_sent += canlog_count;
+        last_canlog_tx = millis();
     } else {
         canlog_send_fail++;
     }
@@ -561,12 +567,49 @@ static void canlog_send_ids(uint32_t now) {
 
 // Flush a partial batch that has been sitting too long (quiet bus), and
 // refresh the id table every 2 s.
+// Empty batch used purely as a liveness signal. The node cannot otherwise
+// tell "gateway is gone" from "gateway is fine but the CAN bus is quiet",
+// and it times out after 8 s either way.
+//
+// The id-table message was originally meant to serve as this heartbeat, but
+// it only sends when canlog_id_count > 0 - and that table is populated FROM
+// CAN frames. With the ignition off there are no frames, so the table stays
+// empty, nothing is transmitted at all, and the node gives up. That made it
+// impossible to arm a recording before turning the key, which is exactly
+// when the ignition-sequence data worth capturing appears.
+static void canlog_send_keepalive() {
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr)];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_CANLOG;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = sizeof(EspDashCanLogHdr);
+    h->seq         = espnow_seq++;
+
+    EspDashCanLogHdr *ch = (EspDashCanLogHdr *)(pkt + sizeof(EspDashHeader));
+    ch->base_ms    = millis();
+    ch->count      = 0;              // decoder handles this as a no-op batch
+    ch->flags      = 0;
+    ch->gw_dropped = (uint16_t)raw_dropped;
+
+    if (esp_now_send(broadcast_mac, pkt, sizeof(pkt)) == ESP_OK) {
+        last_canlog_tx = millis();
+    } else {
+        canlog_send_fail++;
+    }
+}
+
 static void canlog_flush_if_due(uint32_t now) {
     if (canlog_count > 0 && (now - canlog_first_push_ms) >= 20) {
         canlog_send_batch();
     }
-    if (now - last_canlog_ids_send >= 2000) {
+    if (canlog_id_count > 0 && now - last_canlog_ids_send >= 2000) {
         canlog_send_ids(now);
+    }
+    // Keep the link demonstrably alive on a silent bus.
+    if (now - last_canlog_tx >= 1000) {
+        canlog_send_keepalive();
     }
 }
 
@@ -777,8 +820,10 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
 #else
 static void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
 #endif
+    espnow_rx_any++;
     const EspDashNodeCmd *cmd = espdash_parse_nodecmd(data, len);
     if (!cmd) return;
+    espnow_rx_cmd++;
 
     if (cmd->want_canlog) {
         canlog_node_req = true;

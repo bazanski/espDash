@@ -18,7 +18,9 @@
 // BOOT button. GPIO0 doubles as the ST7701's 3-wire SPI CS during panel init;
 // it only becomes usable as an input after release_st7701_spi_pins().
 #define REC_BUTTON_PIN     0
-#define REC_DEBOUNCE_MS    50
+#define REC_DEBOUNCE_MS    250
+// TEMPORARY diagnostic: set to 0 once the button pin is confirmed.
+#define REC_BUTTON_DEBUG   1
 
 // External function defined in ST7701 display driver
 extern "C" void release_st7701_spi_pins(void);
@@ -68,10 +70,12 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 // =========================================================================
 // RECORD BUTTON + STATUS LABEL
 // =========================================================================
-static lv_obj_t *rec_label = NULL;
-
 static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint16_t node_cmd_seq = 0;
+#if REC_BUTTON_DEBUG
+static volatile uint32_t dbg_cmd_sent = 0, dbg_cmd_fail = 0;
+static volatile int      dbg_cmd_err = 0;
+#endif
 
 // Tell the gateway whether we want raw CAN streamed to us. Repeated rather
 // than edge-triggered: ESP-NOW is fire-and-forget, so a single lost "start"
@@ -93,7 +97,13 @@ static void send_node_cmd(bool want) {
     c->node_id     = 1;          // esp-rectangular-314
     c->reserved    = 0;
 
-    esp_now_send(broadcast_mac, pkt, sizeof(pkt));
+    esp_err_t e = esp_now_send(broadcast_mac, pkt, sizeof(pkt));
+#if REC_BUTTON_DEBUG
+    if (e == ESP_OK) dbg_cmd_sent++;
+    else { dbg_cmd_fail++; dbg_cmd_err = e; }
+#else
+    (void)e;
+#endif
 }
 
 // Re-advertise while recording; also send a few explicit stops on release so
@@ -119,91 +129,147 @@ static void node_cmd_tick(uint32_t now) {
     }
 }
 
+#if REC_BUTTON_DEBUG
+static volatile uint32_t dbg_presses = 0, dbg_toggles = 0;
+static volatile uint32_t dbg_start_ok = 0, dbg_start_fail = 0;
+static volatile uint32_t dbg_loop_avg = 0, dbg_loop_max = 0;
+static volatile uint32_t dbg_t_btn = 0, dbg_t_tick = 0, dbg_t_ui = 0, dbg_t_lock = 0;
+#else
+#define dbg_presses (*(volatile uint32_t *)0)  // never referenced when debug off
+#endif
+
+// The button is handled by a GPIO interrupt, not by polling.
+//
+// Polling from loop() cannot work on this board: the LVGL port task runs at
+// priority 5 on core 1 while the Arduino loopTask runs at priority 1, and
+// rendering the 820x320 RGB panel starves the loop badly enough that
+// delay(20) actually returns after ~150 ms (measured: every section of
+// loop() timed 0 ms, yet the loop period was 131-158 ms). A press and its
+// release both fit inside one such gap, so the level was frequently sampled
+// as HIGH both before and after - the press simply never existed as far as
+// the debounce state machine was concerned. That is why 3 presses produced
+// only 2 debounced edges and 1 toggle.
+//
+// An interrupt fires regardless of task scheduling, so it is immune to that
+// entirely. Debouncing happens in the ISR by ignoring anything within
+// REC_DEBOUNCE_MS of the last accepted press.
+static volatile uint32_t isr_last_press_ms = 0;
+static volatile bool     isr_press_pending = false;
+
+static void IRAM_ATTR rec_button_isr(void) {
+    // millis() is backed by esp_timer_get_time(), which is ISR-safe.
+    uint32_t t = millis();
+    if (t - isr_last_press_ms < REC_DEBOUNCE_MS) return;   // bounce
+    isr_last_press_ms = t;
+    isr_press_pending = true;
+#if REC_BUTTON_DEBUG
+    dbg_presses++;
+#endif
+}
+
 static void rec_button_init(void) {
     pinMode(REC_BUTTON_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(REC_BUTTON_PIN), rec_button_isr, FALLING);
 }
 
-// Single short press toggles recording. There is deliberately no long-press
-// gesture: the first version had one for "unmount before removing the card",
-// and it was both buggy (the release still ran the toggle, silently
-// remounting and restarting the recording it had just stopped) and
-// unnecessary. Once a recording is stopped the file is closed and fsync'd,
-// so nothing is in flight and the card can simply be pulled - see
-// canlog_stop() and the "safe to remove" state in rec_label_update().
+// Consumes at most one press per call. Safe to call at whatever rate loop()
+// manages - the ISR does not lose presses in between.
 static void rec_button_poll(uint32_t now) {
-    static bool     last_raw = true;    // pulled up = released
-    static bool     stable = true;
-    static uint32_t last_change = 0;
-
-    bool raw = digitalRead(REC_BUTTON_PIN);
-    if (raw != last_raw) {
-        last_raw = raw;
-        last_change = now;
-        return;
-    }
-    if (now - last_change < REC_DEBOUNCE_MS || raw == stable) return;
-
-    stable = raw;
-    if (stable) {                        // released (active low, so this is the edge)
-        if (canlog_state() == CANLOG_RECORDING) canlog_stop();
-        else                                    canlog_start();
+    (void)now;
+    if (!isr_press_pending) return;
+    isr_press_pending = false;
+#if REC_BUTTON_DEBUG
+    dbg_toggles++;
+#endif
+    if (canlog_state() == CANLOG_RECORDING) {
+        canlog_stop();
+    } else {
+#if REC_BUTTON_DEBUG
+        if (canlog_start()) dbg_start_ok++; else dbg_start_fail++;
+#else
+        canlog_start();
+#endif
     }
 }
 
-// Red REC + elapsed + free space while recording; dim when idle; amber on
-// error. Created here rather than in EEZ so the generated UI can be
-// regenerated without losing it.
-// Colour is applied with an explicit style rather than LVGL's "#rrggbb ...#"
-// recolor markup. Recolor only tints the span between the markers and leaves
-// the rest at the theme default - and this build runs the LIGHT theme
-// (LV_THEME_DEFAULT_DARK 0) on a near-black screen background (0x0f111a), so
-// any un-tinted text would be dark-on-dark and effectively invisible. There
-// are no other labels in the EEZ UI, so nothing had exercised that default
-// before. Styling the whole label per state is both correct and simpler.
+// Drives the two EEZ labels on the Main screen:
+//   status_label  (115,38) - recording state, always populated
+//   warning_label (115,60) - only speaks up when something is wrong
+//
+// Colour is applied here with an explicit style, not via EEZ and not via
+// LVGL's "#rrggbb ...#" recolor markup. EEZ generated no styles at all for
+// this project (styles.c is empty), and the build runs the LIGHT theme
+// (LV_THEME_DEFAULT_DARK 0) over a near-black background (0x0f111a) - so an
+// unstyled label renders dark-on-dark and is effectively invisible. Setting
+// the colour per state in code is both correct and survives a UI re-export.
 static void rec_label_update(void) {
-    if (!rec_label) return;
     char buf[64];
     CanLogState st = canlog_state();
-    uint32_t colour;
 
-    if (st == CANLOG_RECORDING) {
-        uint32_t sec = canlog_elapsed_ms() / 1000;
-        uint32_t drops = canlog_dropped() + canlog_gw_dropped();
-        colour = drops ? 0xffa000 : 0xff4040;   // amber if anything was lost
-        // File number is shown throughout so you can note which recording
-        // corresponds to what you were doing at the time.
-        if (drops) {
-            snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  !%lu",
-                     (unsigned)canlog_file_index(),
-                     (unsigned long)(sec / 60), (unsigned long)(sec % 60),
-                     (unsigned long)drops);
-        } else {
+#if REC_BUTTON_DEBUG
+    static uint32_t dbg_next = 0;
+    if (millis() >= dbg_next) {
+        dbg_next = millis() + 3000;
+        Serial.printf("[UI] status_label=%p warning_label=%p state=%d\n",
+                      (void *)objects.status_label, (void *)objects.warning_label, (int)st);
+    }
+#endif
+
+    // ---- status: what the recorder is doing right now --------------------
+    if (objects.status_label) {
+        uint32_t colour;
+        if (st == CANLOG_RECORDING) {
+            uint32_t sec = canlog_elapsed_ms() / 1000;
+            colour = 0xff4040;
+            // File number is shown throughout so a recording can be tied back
+            // to what you were doing at the time.
             snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " REC %04u  %lu:%02lu  %luMB",
                      (unsigned)canlog_file_index(),
                      (unsigned long)(sec / 60), (unsigned long)(sec % 60),
                      (unsigned long)(canlog_bytes_written() / (1024 * 1024)));
+        } else if (st == CANLOG_ERROR) {
+            colour = 0xffa000;
+            snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %s", sdcard_status_str());
+        } else if (canlog_safe_to_remove()) {
+            // Green is an explicit "every byte is on the card, you can pull it
+            // or cut power" signal, not merely an idle state.
+            colour = 0x40c070;
+            snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB  SAFE",
+                     (unsigned long)sdcard_free_mb());
+        } else {
+            colour = 0x8892a4;
+            snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB",
+                     (unsigned long)sdcard_free_mb());
         }
-    } else if (st == CANLOG_ERROR) {
-        // Name the actual cause. This gets read in a car with no serial
-        // monitor attached, where "SD ERROR" alone leaves you guessing
-        // between a missing card, an exFAT card needing a reformat, and a
-        // full one - each with a completely different fix.
-        colour = 0xffa000;
-        snprintf(buf, sizeof(buf), LV_SYMBOL_WARNING " %s", sdcard_status_str());
-    } else if (canlog_safe_to_remove()) {
-        // Green rather than grey: an explicit "everything is on the card, you
-        // can pull it or cut power" signal, not just an idle state.
-        colour = 0x40c070;
-        snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB OK",
-                 (unsigned long)sdcard_free_mb());
-    } else {
-        colour = 0x8892a4;   // readable grey, not the theme's dark default
-        snprintf(buf, sizeof(buf), LV_SYMBOL_SD_CARD " %luMB",
-                 (unsigned long)sdcard_free_mb());
+        lv_obj_set_style_text_color(objects.status_label, lv_color_hex(colour), LV_PART_MAIN);
+        lv_label_set_text(objects.status_label, buf);
     }
 
-    lv_obj_set_style_text_color(rec_label, lv_color_hex(colour), LV_PART_MAIN);
-    lv_label_set_text(rec_label, buf);
+    // ---- warning: silent unless there is something to say ----------------
+    // Kept empty in the normal case on purpose. A warning line that always
+    // shows something trains you to ignore it, which defeats the point.
+    if (objects.warning_label) {
+        uint32_t drops = canlog_dropped() + canlog_gw_dropped();
+        uint16_t gaps  = canlog_seq_gaps();
+
+        if (st == CANLOG_ERROR) {
+            // Name the actual cause: this is read in a car with no serial
+            // monitor, where a bare "SD ERROR" leaves you guessing between a
+            // missing card, an exFAT card needing a reformat, and a full one -
+            // each with a completely different fix.
+            lv_obj_set_style_text_color(objects.warning_label, lv_color_hex(0xff4040), LV_PART_MAIN);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_WARNING " %s", sdcard_status_str());
+            lv_label_set_text(objects.warning_label, buf);
+        } else if (st == CANLOG_RECORDING && (drops || gaps)) {
+            // Frames lost somewhere in the chain - the capture will have holes.
+            lv_obj_set_style_text_color(objects.warning_label, lv_color_hex(0xffa000), LV_PART_MAIN);
+            snprintf(buf, sizeof(buf), LV_SYMBOL_WARNING " lost %lu  gaps %u",
+                     (unsigned long)drops, (unsigned)gaps);
+            lv_label_set_text(objects.warning_label, buf);
+        } else {
+            lv_label_set_text(objects.warning_label, "");
+        }
+    }
 }
 
 // Global LVGL Chart Series Handles
@@ -294,16 +360,9 @@ void setup() {
 
         // Recording status, top-right. Built here rather than in EEZ Studio
         // so regenerating the UI cannot silently drop it.
-        // Top strip (y 0..31) is free: the chart starts at y=32 and the bars
-        // at x=28/55/82 also start at y=32, so a right-aligned label here
-        // cannot overlap anything. (left_tiers sits at y=428, off a 320-tall
-        // screen, so it is not a factor.)
-        if (objects.main) {
-            rec_label = lv_label_create(objects.main);
-            lv_obj_align(rec_label, LV_ALIGN_TOP_RIGHT, -8, 6);
-            lv_obj_set_style_text_color(rec_label, lv_color_hex(0x8892a4), LV_PART_MAIN);
-            lv_label_set_text(rec_label, LV_SYMBOL_SD_CARD " --");
-        }
+        // Recording status now lives in the EEZ-authored status_label /
+        // warning_label (montserrat_20, far more legible at a glance than the
+        // 14px corner label this replaces), so nothing is created here.
 
         lvgl_port_unlock();
     }
@@ -327,12 +386,47 @@ void setup() {
 
 void loop() {
     uint32_t now = millis();
+#if REC_BUTTON_DEBUG
+    {
+        static uint32_t prev = 0, acc = 0, n = 0;
+        if (prev) {
+            uint32_t d = now - prev;
+            acc += d; n++;
+            if (d > dbg_loop_max) dbg_loop_max = d;
+            if (n >= 20) { dbg_loop_avg = acc / n; acc = 0; n = 0; }
+        }
+        prev = now;
+    }
+#endif
 
     // Record button: polled every pass (not just on the 20 Hz UI tick) so a
     // short press is never missed.
+    uint32_t _t0 = millis();
     rec_button_poll(now);
+    uint32_t _t1 = millis();
     canlog_tick(now);     // auto-closes the file if the gateway goes away
     node_cmd_tick(now);   // keeps the gateway armed while recording
+    uint32_t _t2 = millis();
+    dbg_t_btn  = _t1 - _t0;
+    dbg_t_tick = _t2 - _t1;
+#if REC_BUTTON_DEBUG
+    {
+        static uint32_t hb = 0;
+        if (now >= hb) {
+            hb = now + 2000;
+            Serial.printf("[BTN] presses=%lu toggles=%lu ok=%lu fail=%lu "
+                          "state=%d file=%04u sd=%s tlm=%lu clog=%lu tx=%lu txfail=%lu(%d) loop=%lums\n",
+                          (unsigned long)dbg_presses, (unsigned long)dbg_toggles,
+                          (unsigned long)dbg_start_ok, (unsigned long)dbg_start_fail,
+                          (int)canlog_state(), (unsigned)canlog_file_index(),
+                          sdcard_status_str(),
+                          (unsigned long)pkt_count, (unsigned long)canlog_packets_rx(),
+                          (unsigned long)dbg_cmd_sent, (unsigned long)dbg_cmd_fail,
+                          dbg_cmd_err, (unsigned long)dbg_loop_avg);
+            dbg_loop_max = 0;
+        }
+    }
+#endif
 
     // Link Supervision & Demo Mode Generation
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
@@ -370,8 +464,11 @@ static uint16_t speed_buf_idx = 0;
 
     if (now - last_ui_update >= 50) {
         last_ui_update = now;
+        uint32_t _u0 = millis();
 
+        uint32_t _l0 = millis();
         if (lvgl_port_lock(10)) {
+            dbg_t_lock = millis() - _l0;
             // Chart feed with dynamic speed autoscale (visible 10s window max + 10 km/h padding, baseline 60 km/h)
             if (objects.history_chart && ser_throttle && ser_brake && ser_speed) {
                 uint16_t spd_kmh = active_pkt.speed_kmh_x10 / 10;
@@ -423,6 +520,7 @@ static uint16_t speed_buf_idx = 0;
             ui_tick();
             lvgl_port_unlock();
         }
+        dbg_t_ui = millis() - _u0;
     }
 
     delay(20); // Let LVGL task run uncontested between updates
