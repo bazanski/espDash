@@ -57,8 +57,8 @@ checksum = (8 - (sum of ID nibbles + sum of all data nibbles, excluding the chec
 | **Vehicle speed** | `0x158` | 50 Hz | `BE16(d[0],d[1]) × 0.01 km/h` | 8.69–9.75 km/h on the 10 km/h control trace. Driving on this car (2026-08-09): reads plausible, tracked expected speed | **ON-ROAD** |
 | **Wheel speeds** ×4 | `0x1D0` | 25 Hz | **four 15-bit fields**, start bits 7/8/25/42, `× 0.01 km/h` | On the 10 km/h trace all four read 8.1–9.5 km/h with 0.70 km/h spread. Not individually checked against each other on this car yet — only the combined speed reading was observed | **CONFIRMED** |
 | **Coolant temp** | `0x324` | 5 Hz | `d[0] − 40` °C | 83–86 °C here (dash-verified), 85–92 °C on the Si while warming | **CONFIRMED** |
-| ~~Fuel level~~ **Fuel consumption (instant)** | `0x324` | 5 Hz | `d[1] / 10` L/100km (was guessed as `d[1]/2 %` — **retracted**, see §E) | 37-min real drive (2026-08-15): raw 80–103, smooth monotonic vs. speed — 92.4 idle → 80.0 at 90+ km/h, thousands of samples/bin, no scatter. 8.0–10.3 L/100km fits a Civic's real trip-computer readout | **ON-ROAD** |
-| **Fuel level (tank)** | UNKNOWN | — | not located | Dash read >90% before a 49-min outing, >80% after (2026-08-15, no refuel). `d[1]` of `0x324` never leaves 80–103 raw across the whole outing regardless of formula — ruled out as tank level. No other byte in `0x324` looks plausible (byte0 is coolant; byte2/3/5 range over most of 0–255, too volatile; byte6 is a single bit; byte7 is checksum+counter). A live OBD dongle was confirmed on the bus this session but was polling PIDs 0x05/0x0B/0x0C/0x0D only — not 0x2F (standard fuel level) | **UNMAPPED** |
+| ~~Fuel level~~ **Fuel consumption (instant)** | `0x324` | 5 Hz | `d[1]` = L/100km ×10 (was guessed as `d[1]/2 %` — **retracted**, see §E) | 37-min real drive (2026-08-15): raw 80–103, smooth monotonic vs. speed — 92.4 idle → 80.0 at 90+ km/h, thousands of samples/bin, no scatter. 8.0–10.3 L/100km fits a Civic's real trip-computer readout. Live-decoded in gateway firmware as `fuel_consumption_x10` (was `fuel_pct`, same wire offset) | **ON-ROAD** |
+| **Fuel level (tank)** | UNKNOWN | — | not located | Dash read >90% before a 49-min outing, >80% after (2026-08-15, no refuel). `d[1]` of `0x324` never leaves 80–103 raw across the whole outing regardless of formula — ruled out as tank level. No other byte in `0x324` looks plausible (byte0 is coolant; byte2/3/5 range over most of 0–255, too volatile; byte6 is a single bit; byte7 is checksum+counter). Diagnostic-style traffic was seen on the bus this session (extended IDs, ISO 15765-4 addressing) polling coolant/MAP/RPM/speed — likely the instrument cluster's own trip computer, not an external tool, since none was connected — but not PID 0x2F (standard fuel level) | **UNMAPPED** |
 | **Steering angle** | `0x156` | 50 Hz | `BE16s(d[0],d[1]) / 10` ° | Magnitude confirmed on the Si (spans ±500°, matching the sensor's spec). **Sign** corrected by an on-road test on this car (2026-08-09): opendbc's documented `-0.1` factor gave inverted left/right here | **ON-ROAD** |
 | **Steering rate** | `0x156` | 50 Hz | `BE16s(d[2],d[3])` °/s | opendbc `STEER_ANGLE_RATE`. Sign changed to match the angle fix above; not independently re-checked | **REFERENCE** |
 | **Brake pressure** | `0x1A4` | 25 Hz | `BE16(d[0],d[1]) × 0.015625 − 1.609375` | Rest ≈ 98–100 raw on both cars; range to 526 here. On-road: "looks ok" | **ON-ROAD** |
@@ -107,7 +107,7 @@ remaining surface.
 
 | ID | DLC | Hz | Meaning | ID | DLC | Hz | Meaning |
 |---|---|---|---|---|---|---|---|
-| `0x039` | 3 | 25 | — | `0x324` | 8 | 10 | coolant + fuel ✅ |
+| `0x039` | 3 | 25 | — | `0x324` | 8 | 10 | coolant + consumption ✅ |
 | `0x091` | 8 | 100 | `KINEMATICS_ALT` lat accel (opendbc) | `0x328` | 8 | 10 | — |
 | `0x13C` | 8 | 100 | `GAS_PEDAL` (b4 mirrors 0x17C b0) | `0x372` | 2 | 10 | flag, **not** ambient |
 | `0x156` | 6 | 100 | steering ✅ | `0x374` | 7 | 10 | `STALK_STATUS` wipers/lights |
@@ -183,17 +183,22 @@ None of `0x324`'s other bytes look like a plausible tank-level signal either (by
 coolant; bytes 2/3/5 range over most of 0–255, too volatile for a slowly-draining tank; byte 6 is a
 single bit; byte 7 is the checksum+counter nibble). **Actual fuel level remains UNMAPPED.**
 
-A live OBD-II dongle was also confirmed on the bus this session (extended IDs `0x18DB33F1`
-request / `0x18DAF10E` response, ISO 15765-4 extended addressing) — but it was polling Mode 01 PIDs
-`0x05`/`0x0B`/`0x0C`/`0x0D` (coolant/MAP/RPM/speed) only, not `0x2F` (standard fuel level), so it
-didn't resolve this. Their answers cross-validated our own decode independently, though: PID 0x05
-`0x79` → 121−40 = 81 °C, matching `0x324` byte0's coolant reading; PID 0x0C `0x0B,0x34` → 717 RPM at
-idle; PID 0x0D `0x00` → 0 km/h stationary — all consistent.
+Diagnostic-style request/response traffic was also seen on the bus this session (extended IDs
+`0x18DB33F1` request / `0x18DAF10E` response, ISO 15765-4 extended addressing) — no external scan
+tool was connected, so this is very likely the instrument cluster itself, polling the ECU
+internally for its own trip computer. It was asking Mode 01 PIDs `0x05`/`0x0B`/`0x0C`/`0x0D`
+(coolant/MAP/RPM/speed) only, not `0x2F` (standard fuel level), so it didn't resolve this. Their
+answers cross-validated our own decode independently, though: PID 0x05 `0x79` → 121−40 = 81 °C,
+matching `0x324` byte0's coolant reading; PID 0x0C `0x0B,0x34` → 717 RPM at idle; PID 0x0D `0x00`
+→ 0 km/h stationary — all consistent. (This also suggests where `0x324 byte1` itself comes from:
+the cluster likely computes and broadcasts the same consumption figure it derives from these four
+inputs, rather than every module re-deriving it.)
 
-**Next step, if the dongle's app supports custom PIDs:** add `0x2F` to its poll list on the next
-drive for an authoritative, standardized fuel-level reading independent of guessing at proprietary
-Honda bytes. Otherwise this needs the same before/after-refuel bracketing that falsified `d[1]` here,
-applied to other unclaimed IDs.
+The gateway is listen-only by design and cannot transmit a PID 0x2F request itself (see §F). If
+fuel level over CAN is wanted, that needs a second, separate, transmitting OBD tool — this gateway
+will not become one. Otherwise, the only path left is the same before/after-refuel bracketing that
+falsified `d[1]` here, applied to other unclaimed IDs, or simply accepting tank level is not
+recoverable from this car's broadcast bus and staying with the dash for it.
 
 **Not yet exercised this session:** ABS, TC, CEL (still UNMAPPED per §B — unaffected by this
 drive), wheel-speed agreement across all four wheels individually (only the combined speed reading
@@ -204,9 +209,13 @@ was watched), oil temperature (not on the bus, unaffected).
 ## F. OBD-II (passive observation only)
 
 The 2026-08-06 capture contains `0x18DB33F1` (functional request) and `0x18DAF10E` (physical
-response) because a scan tool was plugged in at the time. Standard Mode 01 PIDs and Honda's Mode 22
-extended PIDs — including engine oil and ATF temperature — are reachable **only by transmitting a
-request**, which this gateway will not do.
+response); this was originally attributed to a scan tool being plugged in at the time. **That
+attribution is now doubtful.** The 2026-08-15 session shows the identical pair, polling the same
+four PIDs, with no external tool connected at all (see §E) — most likely the instrument cluster
+itself, computing its own trip-computer consumption figure. The 2026-08-06 capture was never
+independently confirmed to have a scan tool attached; it may be the same internal traffic. Either
+way: standard Mode 01 PIDs and Honda's Mode 22 extended PIDs — including engine oil and ATF
+temperature — are reachable **only by transmitting a request**, which this gateway will not do.
 
 If those values are ever wanted, use a second, separate OBD dongle for calibration. The gateway
 stays listen-only.

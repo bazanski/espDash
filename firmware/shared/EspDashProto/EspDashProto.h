@@ -68,7 +68,12 @@ typedef struct __attribute__((packed)) {
     int16_t  oil_temp_x10;   // -400..+1500; NOT available passively, stays 0
     uint16_t battery_mv;     // millivolts, e.g. 14200 = 14.2 V
     uint8_t  gear;           // 0=P 1=R 2=N 3=D 4=S
-    uint8_t  fuel_pct;       // 0-100 %
+    uint8_t  fuel_consumption_x10; // instant consumption, L/100km x10 (94=9.4).
+                                    // Renamed from fuel_pct 2026-08-15: that
+                                    // field was fuel LEVEL % (d[1]/2), which
+                                    // was wrong (see CAN_PROTOCOL_MAP.md).
+                                    // Same byte, same offset, corrected value
+                                    // and meaning. Tank level is unmapped.
     int16_t  steering_deg;   // signed degrees, negative = left
     int8_t   ambient_temp;   // whole degrees C
     uint8_t  flags;          // see ESPDASH_FLAG_* below
@@ -111,7 +116,7 @@ static_assert(offsetof(EspDashTelemetry, water_temp_x10)  ==  4, "v2.0 layout fr
 static_assert(offsetof(EspDashTelemetry, oil_temp_x10)    ==  6, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, battery_mv)      ==  8, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, gear)            == 10, "v2.0 layout frozen");
-static_assert(offsetof(EspDashTelemetry, fuel_pct)        == 11, "v2.0 layout frozen");
+static_assert(offsetof(EspDashTelemetry, fuel_consumption_x10) == 11, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, steering_deg)    == 12, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, ambient_temp)    == 14, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, flags)           == 15, "v2.0 layout frozen");

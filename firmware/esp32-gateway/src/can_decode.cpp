@@ -185,9 +185,19 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
         else hit = false;
         break;
 
-    // 0x324 - coolant and fuel. opendbc labels this CRUISE/HUD_SPEED_KPH, but
-    // that would mean 125 km/h on a stationary car; the coolant/fuel reading
-    // is dash-verified here and gives 85-92 C / 28-31.5% on the Si trace.
+    // 0x324 - coolant temp and instant fuel consumption. opendbc labels this
+    // CRUISE/HUD_SPEED_KPH, but that would mean 125 km/h on a stationary car;
+    // coolant is dash-verified and gives 85-92 C on the Si trace.
+    //
+    // byte1 was originally decoded as fuel level % (d[1]/2) and marked
+    // CONFIRMED. That was wrong, not just noisy: a 49-min real outing with no
+    // refuel had the dash reading >90% -> >80% while this formula sat at
+    // 41-52% throughout, under any linear scale of the byte. Binned by speed
+    // the byte is smooth and monotonic instead - 92.4 raw at 0-10 km/h down
+    // to 80.0 at 90-100 km/h, ~zero correlation with short-term acceleration
+    // - the signature of instant consumption, not tank level. The raw byte
+    // IS the value, x10 L/100km (94 -> 9.4); no division needed. See
+    // docs/CAN_PROTOCOL_MAP.md for the full writeup. Tank level is unmapped.
     case 0x324:
         if (dlc >= 2) {
             if (d[0] > 0) {
@@ -198,8 +208,8 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
                 }
             }
             if (d[1] <= 200) {
-                st->fuel_pct = (uint8_t)clamp_i(d[1] / 2, 0, 100);
-                touch(st, SIG_FUEL, now_ms);
+                st->fuel_consumption_x10 = d[1];
+                touch(st, SIG_FUEL_CONSUMPTION, now_ms);
             }
         } else hit = false;
         break;

@@ -34,7 +34,7 @@
 // a frozen value when its source message stops arriving.
 enum CanSigGroup {
     SIG_RPM = 0, SIG_SPEED, SIG_WHEELS, SIG_STEER, SIG_BRAKE, SIG_THROTTLE,
-    SIG_COOLANT, SIG_FUEL, SIG_BATTERY, SIG_AMBIENT, SIG_GEAR, SIG_COUNT
+    SIG_COOLANT, SIG_FUEL_CONSUMPTION, SIG_BATTERY, SIG_AMBIENT, SIG_GEAR, SIG_COUNT
 };
 
 typedef struct {
@@ -50,7 +50,10 @@ typedef struct {
     int16_t  oil_temp_x10;      // never set from CAN - see note at bottom
     uint16_t battery_mv;
     uint8_t  gear;              // 0=P 1=R 2=N 3=D 4=S
-    uint8_t  fuel_pct;
+    uint8_t  fuel_consumption_x10; // instant consumption, L/100km x10 (94 = 9.4).
+                                    // NOT tank level - that byte was misread as
+                                    // fuel % until 2026-08-15; see CAN_PROTOCOL_MAP.md.
+                                    // Tank level is unmapped.
     int16_t  steering_deg;      // negative = left
     int16_t  steering_rate_dps;
     int8_t   ambient_temp;

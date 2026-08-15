@@ -288,7 +288,7 @@ static void apply_demo(CanDecodeState *s, float sim_t) {
     s->oil_temp_x10    = (int16_t)((92.0f + 4.0f * sinf(sim_t * 0.08f)) * 10.0f);
     s->battery_mv      = (uint16_t)((13.8f + 0.3f * sinf(sim_t * 0.5f)) * 1000.0f);
     s->gear            = gear_idx;
-    s->fuel_pct        = 78;
+    s->fuel_consumption_x10 = 85;   // demo: 8.5 L/100km
     s->throttle_pct    = throt;
     s->steering_deg    = steer;
     s->ambient_temp    = 23;
@@ -776,8 +776,8 @@ static void canlog_flush_if_due(uint32_t now) {
 
 // Dynamic signals must not sit frozen when the bus goes quiet: showing 5000
 // rpm on a switched-off car is worse than showing zero. Slow-moving signals
-// (coolant, fuel, battery, ambient, gear) legitimately persist and are left
-// at their last known value.
+// (coolant, fuel consumption, battery, ambient, gear) legitimately persist
+// and are left at their last known value.
 static void apply_staleness(CanDecodeState *s, uint32_t now) {
     const uint32_t T = 2000;
     if (can_decode_is_stale(s, SIG_RPM, now, T))      s->rpm = 0;
@@ -929,7 +929,7 @@ static void publishTask(void *arg) {
             t->oil_temp_x10    = snap.oil_temp_x10;
             t->battery_mv      = snap.battery_mv;
             t->gear            = (snap.gear == 0xFF) ? 0 : snap.gear;
-            t->fuel_pct        = snap.fuel_pct;
+            t->fuel_consumption_x10 = snap.fuel_consumption_x10;
             t->steering_deg    = snap.steering_deg;
             t->ambient_temp    = snap.ambient_temp;
             t->flags           = can_decode_flags(&snap);
@@ -967,7 +967,7 @@ static void publishTask(void *arg) {
             snprintf(json_buf, sizeof(json_buf),
                 "{\"type\":\"telemetry\",\"mac\":\"%s\",\"rpm\":%u,\"speed\":%.1f,"
                 "\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,"
-                "\"fuel\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
+                "\"fuel_consumption_x10\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
                 "\"tc\":%s,\"brake_sw\":%s,\"cel\":%s,\"vsa_warn\":%s,\"w_fl\":%.1f,"
                 "\"w_fr\":%.1f,\"w_rl\":%.1f,\"w_rr\":%.1f,\"ambient\":%d,"
                 "\"dropped\":%lu,\"timestamp\":%lu}\n",
@@ -978,7 +978,7 @@ static void publishTask(void *arg) {
                 snap.oil_temp_x10 / 10.0f,
                 snap.battery_mv / 1000.0f,
                 (snap.gear == 0xFF) ? 0 : snap.gear,
-                snap.fuel_pct,
+                snap.fuel_consumption_x10,
                 snap.throttle_pct,
                 snap.steering_deg,
                 snap.brake_pct,

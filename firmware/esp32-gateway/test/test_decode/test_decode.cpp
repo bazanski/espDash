@@ -132,9 +132,9 @@ static bool replay(const char *name, ReplayStats *out, bool moving_only) {
             if (c < out->coolant_min) out->coolant_min = c;
             if (c > out->coolant_max) out->coolant_max = c;
         }
-        if (st.last_update_ms[SIG_FUEL]) {
-            if (st.fuel_pct < out->fuel_min) out->fuel_min = st.fuel_pct;
-            if (st.fuel_pct > out->fuel_max) out->fuel_max = st.fuel_pct;
+        if (st.last_update_ms[SIG_FUEL_CONSUMPTION]) {
+            if (st.fuel_consumption_x10 < out->fuel_min) out->fuel_min = st.fuel_consumption_x10;
+            if (st.fuel_consumption_x10 > out->fuel_max) out->fuel_max = st.fuel_consumption_x10;
         }
         if (st.battery_mv) {
             float v = st.battery_mv / 1000.0f;
@@ -267,7 +267,8 @@ static void test_user_2014_capture_regression(void) {
     TEST_ASSERT_TRUE(replay("civic9_user_2014.txt", &s, false));
     TEST_ASSERT_EQUAL_UINT32(0, s.rejects);
 
-    printf("\n  [this car] coolant %.1f-%.1f C  fuel %.0f-%.0f%%  batt %.2f-%.2f V  ambient %d-%d C\n",
+    printf("\n  [this car] coolant %.1f-%.1f C  fuel consumption %.0f-%.0f (x10 L/100km)  "
+           "batt %.2f-%.2f V  ambient %d-%d C\n",
            s.coolant_min, s.coolant_max, s.fuel_min, s.fuel_max,
            s.batt_min, s.batt_max, s.ambient_min, s.ambient_max);
     printf("  [this car] rpm %u-%u  wheels max %.1f km/h\n",
@@ -275,7 +276,15 @@ static void test_user_2014_capture_regression(void) {
 
     // Dash-verified against the instrument cluster; these are the anchors.
     TEST_ASSERT_TRUE(s.coolant_min >= 82.0f && s.coolant_max <= 88.0f);
-    TEST_ASSERT_TRUE(s.fuel_min >= 49.0f && s.fuel_max <= 52.0f);
+    // This fixture is a stationary/idle capture (2026-08-08). It is NOT a
+    // dash-verified anchor for fuel like the others here - it was originally
+    // written as one, decoding byte1/2 as fuel level %, before a 2026-08-15
+    // real drive with no refuel proved that formula wrong at the absolute
+    // value, not just noisy (see CAN_PROTOCOL_MAP.md). Re-pinned to the raw
+    // byte the fixture actually contains (101-102), now understood as instant
+    // consumption x10 L/100km - a plausible idle-range reading (10.1-10.2),
+    // not a claim this fixture proves the formula, only a regression guard.
+    TEST_ASSERT_TRUE(s.fuel_min >= 100.0f && s.fuel_max <= 103.0f);
     TEST_ASSERT_TRUE(s.batt_min >= 14.0f && s.batt_max <= 14.4f);
 
     // Ambient now comes from 0x21E byte 4 only. 0x372 is a flag, not a
@@ -391,7 +400,7 @@ static void test_staleness(void) {
     TEST_ASSERT_FALSE(can_decode_is_stale(&st, SIG_RPM, 1500, 2000));
     TEST_ASSERT_TRUE(can_decode_is_stale(&st, SIG_RPM, 4000, 2000));
     // A signal never seen is stale from the start.
-    TEST_ASSERT_TRUE(can_decode_is_stale(&st, SIG_FUEL, 1000, 2000));
+    TEST_ASSERT_TRUE(can_decode_is_stale(&st, SIG_FUEL_CONSUMPTION, 1000, 2000));
 }
 
 // Corrected by an on-car road test (2026-08-09): every position was off by
