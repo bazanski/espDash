@@ -81,6 +81,16 @@ enum OperationalMode {
 // Effective state is the OR of the two.
 static volatile bool     canlog_manual = false;
 static volatile bool     canlog_node_req = false;
+// Set by either stop path (serial LOG:OFF, or an explicit ESP-NOW stop
+// command) and drained by publishTask - the sole owner of canlog_buf/
+// canlog_count. Without this, a partial batch sitting in the buffer at the
+// moment of stop was neither sent nor cleared: it sat frozen until the
+// recorder was next armed, at which point canlog_flush_if_due()'s staleness
+// check trivially fired (its timer had been sitting for arbitrary minutes)
+// and shipped it as the FIRST packet of a completely different recording -
+// tail frames from one drive appearing, mislabeled with an ancient
+// timestamp, at the head of the next drive's file.
+static volatile bool     canlog_flush_on_stop = false;
 static volatile uint32_t canlog_node_req_ms = 0;
 
 static inline bool canlog_active() {
@@ -331,6 +341,7 @@ static void process_cmd_string(String cmd) {
         broadcast_line("[LOG] CAN log streaming ENABLED (ESP-NOW -> SD recorder)\n");
     } else if (cmd == "LOG:OFF" || cmd == "LOG_OFF" || cmd == "LOG:0") {
         canlog_manual = false;
+        canlog_flush_on_stop = true;
         broadcast_line("[LOG] CAN log streaming DISABLED\n");
     } else if (cmd == "LOGTEST:ON" || cmd == "LOGTEST:1") {
         // Deliberately NOT reset: canlog_frames_sent and every other STATS
@@ -876,7 +887,14 @@ static void publishTask(void *arg) {
             if (active && !prev_active) last_canlog_ids_send = 0;
             prev_active = active;
         }
-        if (canlog_active()) canlog_flush_if_due(now);
+        if (canlog_active()) {
+            canlog_flush_if_due(now);
+        } else if (canlog_flush_on_stop) {
+            // Runs exactly once per stop, after the last add_frame() for this
+            // session (add_frame is gated on canlog_active(), already false).
+            canlog_flush_on_stop = false;
+            canlog_send_batch();
+        }
 
         // ---- 4. Snapshot -------------------------------------------------
         CanDecodeState snap;
@@ -1005,6 +1023,7 @@ static void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
         // An explicit "stop" takes effect immediately rather than waiting
         // for the timeout, so releasing the button feels instant.
         canlog_node_req = false;
+        canlog_flush_on_stop = true;
     }
 }
 
