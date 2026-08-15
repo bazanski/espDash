@@ -57,7 +57,8 @@ checksum = (8 - (sum of ID nibbles + sum of all data nibbles, excluding the chec
 | **Vehicle speed** | `0x158` | 50 Hz | `BE16(d[0],d[1]) × 0.01 km/h` | 8.69–9.75 km/h on the 10 km/h control trace. Driving on this car (2026-08-09): reads plausible, tracked expected speed | **ON-ROAD** |
 | **Wheel speeds** ×4 | `0x1D0` | 25 Hz | **four 15-bit fields**, start bits 7/8/25/42, `× 0.01 km/h` | On the 10 km/h trace all four read 8.1–9.5 km/h with 0.70 km/h spread. Not individually checked against each other on this car yet — only the combined speed reading was observed | **CONFIRMED** |
 | **Coolant temp** | `0x324` | 5 Hz | `d[0] − 40` °C | 83–86 °C here (dash-verified), 85–92 °C on the Si while warming | **CONFIRMED** |
-| **Fuel level** | `0x324` | 5 Hz | `d[1] / 2` % | 50.5–51 % here (matches tank), 28–31.5 % on the Si. On-road: value sits around 50% as expected but **drifts upward intermittently** — see the open question in §E before treating this as fully settled | **CONFIRMED** |
+| ~~Fuel level~~ **Fuel consumption (instant)** | `0x324` | 5 Hz | `d[1] / 10` L/100km (was guessed as `d[1]/2 %` — **retracted**, see §E) | 37-min real drive (2026-08-15): raw 80–103, smooth monotonic vs. speed — 92.4 idle → 80.0 at 90+ km/h, thousands of samples/bin, no scatter. 8.0–10.3 L/100km fits a Civic's real trip-computer readout | **ON-ROAD** |
+| **Fuel level (tank)** | UNKNOWN | — | not located | Dash read >90% before a 49-min outing, >80% after (2026-08-15, no refuel). `d[1]` of `0x324` never leaves 80–103 raw across the whole outing regardless of formula — ruled out as tank level. No other byte in `0x324` looks plausible (byte0 is coolant; byte2/3/5 range over most of 0–255, too volatile; byte6 is a single bit; byte7 is checksum+counter). A live OBD dongle was confirmed on the bus this session but was polling PIDs 0x05/0x0B/0x0C/0x0D only — not 0x2F (standard fuel level) | **UNMAPPED** |
 | **Steering angle** | `0x156` | 50 Hz | `BE16s(d[0],d[1]) / 10` ° | Magnitude confirmed on the Si (spans ±500°, matching the sensor's spec). **Sign** corrected by an on-road test on this car (2026-08-09): opendbc's documented `-0.1` factor gave inverted left/right here | **ON-ROAD** |
 | **Steering rate** | `0x156` | 50 Hz | `BE16s(d[2],d[3])` °/s | opendbc `STEER_ANGLE_RATE`. Sign changed to match the angle fix above; not independently re-checked | **REFERENCE** |
 | **Brake pressure** | `0x1A4` | 25 Hz | `BE16(d[0],d[1]) × 0.015625 − 1.609375` | Rest ≈ 98–100 raw on both cars; range to 526 here. On-road: "looks ok" | **ON-ROAD** |
@@ -80,6 +81,7 @@ checksum = (8 - (sum of ID nibbles + sum of all data nibbles, excluding the chec
 | **ABS active** | **UNMAPPED.** `0x1A0`, which earlier firmware read, does not exist on a 9th-gen bus — it appears only on the 2008 8th-gen car. No available capture contains an ABS activation. See `CAPTURE_ABS_TC.md` |
 | **Traction control** | **UNMAPPED.** Same as above. The Si trace peaks at 2.68 km/h front-to-rear slip with zero sustained slip windows — that run never triggered TC |
 | **Check engine light** | **UNMAPPED.** No candidate identified |
+| **Fuel level (tank)** | **UNMAPPED as of 2026-08-15** — see §E. `0x324 d[1]` was a wrong guess (retracted), and no other byte in any captured ID looks plausible yet |
 | **Oil temperature** | **Not on the broadcast bus at all** in any of the four captures. It exists only as a Mode-22 diagnostic PID, which requires transmitting a request. The gateway is listen-only by design, so this stays 0 — it is not an unfinished gap |
 
 ## C. Corrections applied (and what they were before)
@@ -159,20 +161,39 @@ recording.
   (139), not this car's. One wide-open-throttle pull, read from `MODE:RAW` or `STATS`-adjacent
   logging of `0x17C` byte 0 at full pedal, gives the real number — it is a single `#define`.
 
-**Open question — not yet a confirmed bug:**
-- **Fuel level drifts upward intermittently**, staying near the expected ~50% but not holding
-  steady. Two explanations are plausible and this table takes no position yet:
-  1. **Real sender behavior.** Fuel gauges on most cars deliberately damp and occasionally
-     recalibrate against slosh, so ordinary movement of the reading is expected and not a decode bug.
-  2. **An encoding detail specific to this ID.** `d[1] / 2` was derived from a stationary capture
-     where byte 1 only ever took a couple of values; there could be a rounding, damping, or
-     multi-byte component invisible until the car moved.
+**RESOLVED (2026-08-15) — `0x324 d[1]` is not fuel level:**
+The original `d[1] / 2 %` guess is retracted. A 49-minute real outing (three recordings,
+`canlog_0002/0003/0004.bin`, ~1.03M checksum-valid `0x324` frames) settled it two ways:
 
-  Resolving this needs a short **synced** capture — `MODE:RAW` running while watching the fuel
-  gauge, with the gateway's own timestamps — so the raw `0x324` byte 1 sequence can be lined up
-  against exactly when the displayed value moves. That is a materially different kind of check than
-  everything else in this document, which relied on trace replay; this one needs a live, annotated
-  capture on this car specifically.
+1. **The dash disagreed outright, not just by drifting.** Fuel read >90% before the outing, >80%
+   after, with no refuel. `d[1]` never left the 80–103 raw range at *either* end of the whole
+   session — under any linear scale that range cannot reach 80–90%. This was a wrong absolute
+   value, not sender noise around a roughly-correct one.
+2. **The real behavior is a clean, physically sensible signal — just not fuel level.** Binned by
+   speed, `d[1]` is smooth and monotonic: mean 92.4 at 0–10 km/h down to 80.0 at 90–100 km/h,
+   thousands of samples per bin, effectively no scatter. That shape — high at idle/stop-go, low at
+   efficient cruise — is the signature of **instantaneous fuel consumption**, not tank level. Scaled
+   `d[1] / 10`, it reads 8.0–10.3 L/100km: a plausible real-time trip-computer figure for this car,
+   and exactly the reading a driver watching the *fuel gauge bar* (not the consumption readout)
+   would never have cross-checked. (Credit: this reframe was the user's hypothesis, not derived from
+   the data first — it fit strictly better than an earlier "sender tilt" theory floated before the
+   speed-binned shape was checked.)
+
+None of `0x324`'s other bytes look like a plausible tank-level signal either (byte 0 is confirmed
+coolant; bytes 2/3/5 range over most of 0–255, too volatile for a slowly-draining tank; byte 6 is a
+single bit; byte 7 is the checksum+counter nibble). **Actual fuel level remains UNMAPPED.**
+
+A live OBD-II dongle was also confirmed on the bus this session (extended IDs `0x18DB33F1`
+request / `0x18DAF10E` response, ISO 15765-4 extended addressing) — but it was polling Mode 01 PIDs
+`0x05`/`0x0B`/`0x0C`/`0x0D` (coolant/MAP/RPM/speed) only, not `0x2F` (standard fuel level), so it
+didn't resolve this. Their answers cross-validated our own decode independently, though: PID 0x05
+`0x79` → 121−40 = 81 °C, matching `0x324` byte0's coolant reading; PID 0x0C `0x0B,0x34` → 717 RPM at
+idle; PID 0x0D `0x00` → 0 km/h stationary — all consistent.
+
+**Next step, if the dongle's app supports custom PIDs:** add `0x2F` to its poll list on the next
+drive for an authoritative, standardized fuel-level reading independent of guessing at proprietary
+Honda bytes. Otherwise this needs the same before/after-refuel bracketing that falsified `d[1]` here,
+applied to other unclaimed IDs.
 
 **Not yet exercised this session:** ABS, TC, CEL (still UNMAPPED per §B — unaffected by this
 drive), wheel-speed agreement across all four wheels individually (only the combined speed reading
