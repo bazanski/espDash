@@ -216,6 +216,14 @@
         <div class="controls-panel">
             <h2>🎛️ Live Telemetry Simulator</h2>
 
+            <div class="control-group" style="margin-bottom: 18px; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 10px; border: 1px solid #222e48;">
+                <label style="font-weight: bold; color: var(--text-main);">🎨 EEZ Studio Theme Selector</label>
+                <select id="themeSelector" style="width: 100%; padding: 8px 12px; border-radius: 6px; background: #0f1523; color: #fff; border: 1px solid #2a3854; font-size: 13px; font-weight: 600; cursor: pointer;">
+                    <option value="theme_default">Cyber Cyan (Default)</option>
+                    <option value="theme_18_black_white_shapes">Theme 18: The Black White Shapes (EEZ Studio #18)</option>
+                </select>
+            </div>
+
             <div class="control-group">
                 <label>1. Engine Speed (RPM) <span class="val" id="valRpm">5400 RPM</span></label>
                 <input type="range" id="sliderRpm" min="0" max="8500" value="5400" step="50">
@@ -321,11 +329,38 @@
             btnAutoDemo.textContent = isDemoMode ? '⏸ Pause Demo' : '▶ Auto Demo Sweep';
         });
 
+        const themeSelector = document.getElementById('themeSelector');
+        themeSelector.addEventListener('change', () => {
+            if (themeSelector.value === 'theme_18_black_white_shapes') {
+                document.body.setAttribute('data-theme', 'theme-18');
+                canvas.style.backgroundColor = '#000000';
+            } else {
+                document.body.removeAttribute('data-theme');
+                canvas.style.backgroundColor = '#050811';
+            }
+            drawGauge();
+        });
+
         function drawGauge() {
             const w = canvas.width; // 480
             const h = canvas.height; // 480
             const cx = w / 2;
             const cy = h / 2;
+
+            const isTheme18 = (themeSelector.value === 'theme_18_black_white_shapes');
+
+            // Theme Color Tokens
+            const colorRpmStart = isTheme18 ? '#9A9797' : '#00f0ff';
+            const colorRpmMid = isTheme18 ? '#DBCFCF' : '#00ff66';
+            const colorRpmPeak = isTheme18 ? '#ffffff' : '#ffcc00';
+            const colorRpmAlert = isTheme18 ? '#ffffff' : '#ff3366';
+
+            const colorThrottle = isTheme18 ? '#ffffff' : '#00ff66';
+            const colorBrake = isTheme18 ? '#9A9797' : '#0088ff';
+            const colorSteering = isTheme18 ? '#DBCFCF' : '#00f0ff';
+            const colorTextMuted = isTheme18 ? '#9A9797' : '#8a99ad';
+            const colorTrack = isTheme18 ? '#1c1c1c' : '#151f33';
+            const colorBgTrack = isTheme18 ? '#121212' : '#101726';
 
             ctx.clearRect(0, 0, w, h);
 
@@ -353,13 +388,17 @@
                 ctx.arc(lx, ly, 10, 0, Math.PI * 2);
 
                 if (rpmPct >= activeThreshold) {
-                    if (i < 5) ctx.fillStyle = '#00ff66';      // Green LEDs
-                    else if (i < 10) ctx.fillStyle = '#ffcc00'; // Yellow LEDs
-                    else ctx.fillStyle = '#ff0044';             // Red Shift Warning
+                    if (isTheme18) {
+                        ctx.fillStyle = (i < 5) ? '#9A9797' : ((i < 10) ? '#DBCFCF' : '#ffffff');
+                    } else {
+                        if (i < 5) ctx.fillStyle = '#00ff66';      // Green LEDs
+                        else if (i < 10) ctx.fillStyle = '#ffcc00'; // Yellow LEDs
+                        else ctx.fillStyle = '#ff0044';             // Red Shift Warning
+                    }
                     ctx.shadowColor = ctx.fillStyle;
-                    ctx.shadowBlur = 12;
+                    ctx.shadowBlur = isTheme18 ? 6 : 12;
                 } else {
-                    ctx.fillStyle = '#151d2a';
+                    ctx.fillStyle = isTheme18 ? '#181818' : '#151d2a';
                     ctx.shadowBlur = 0;
                 }
                 ctx.fill();
@@ -374,24 +413,24 @@
             // Track background arc
             ctx.beginPath();
             ctx.arc(cx, cy, 185, rpmAngleStart, rpmAngleEnd);
-            ctx.strokeStyle = '#151f33';
+            ctx.strokeStyle = colorTrack;
             ctx.lineWidth = 14;
             ctx.stroke();
 
             // Active RPM arc gradient
             const rpmGrad = ctx.createConicGradient(rpmAngleStart, cx, cy);
-            rpmGrad.addColorStop(0, '#00f0ff');
-            rpmGrad.addColorStop(0.6, '#00ff66');
-            rpmGrad.addColorStop(0.85, '#ffcc00');
-            rpmGrad.addColorStop(1.0, '#ff3366');
+            rpmGrad.addColorStop(0, colorRpmStart);
+            rpmGrad.addColorStop(0.6, colorRpmMid);
+            rpmGrad.addColorStop(0.85, colorRpmPeak);
+            rpmGrad.addColorStop(1.0, colorRpmAlert);
 
             ctx.beginPath();
             ctx.arc(cx, cy, 185, rpmAngleStart, currentRpmAngle);
             ctx.strokeStyle = rpmGrad;
             ctx.lineWidth = 14;
             ctx.lineCap = 'round';
-            ctx.shadowColor = '#00f0ff';
-            ctx.shadowBlur = 15;
+            ctx.shadowColor = colorRpmStart;
+            ctx.shadowBlur = isTheme18 ? 4 : 15;
             ctx.stroke();
             ctx.shadowBlur = 0;
 
@@ -402,22 +441,22 @@
 
             ctx.beginPath();
             ctx.arc(cx, cy, 155, thStart, thEnd);
-            ctx.strokeStyle = '#101726';
+            ctx.strokeStyle = colorBgTrack;
             ctx.lineWidth = 10;
             ctx.stroke();
 
             ctx.beginPath();
             ctx.arc(cx, cy, 155, thStart, thValAngle);
-            ctx.strokeStyle = '#00ff66';
+            ctx.strokeStyle = colorThrottle;
             ctx.lineWidth = 10;
             ctx.lineCap = 'round';
-            ctx.shadowColor = '#00ff66';
-            ctx.shadowBlur = 8;
+            ctx.shadowColor = colorThrottle;
+            ctx.shadowBlur = isTheme18 ? 4 : 8;
             ctx.stroke();
             ctx.shadowBlur = 0;
 
-            // Throttle label (positioned to the RIGHT / inside of the throttle arc slider)
-            ctx.fillStyle = '#00ff66';
+            // Throttle label
+            ctx.fillStyle = colorThrottle;
             ctx.font = 'bold 16px monospace';
             ctx.textAlign = 'left';
             ctx.fillText(`${Math.round(throttle)}%`, cx - 128, cy);
@@ -429,22 +468,22 @@
 
             ctx.beginPath();
             ctx.arc(cx, cy, 155, brEnd, brStart);
-            ctx.strokeStyle = '#101726';
+            ctx.strokeStyle = colorBgTrack;
             ctx.lineWidth = 10;
             ctx.stroke();
 
             ctx.beginPath();
             ctx.arc(cx, cy, 155, brValAngle, brStart);
-            ctx.strokeStyle = '#0088ff';
+            ctx.strokeStyle = colorBrake;
             ctx.lineWidth = 10;
             ctx.lineCap = 'round';
-            ctx.shadowColor = '#0088ff';
-            ctx.shadowBlur = 8;
+            ctx.shadowColor = colorBrake;
+            ctx.shadowBlur = isTheme18 ? 4 : 8;
             ctx.stroke();
             ctx.shadowBlur = 0;
 
-            // Brake label (positioned to the LEFT / inside of the brake arc slider)
-            ctx.fillStyle = '#0088ff';
+            // Brake label
+            ctx.fillStyle = colorBrake;
             ctx.font = 'bold 16px monospace';
             ctx.textAlign = 'right';
             ctx.fillText(`${Math.round(brake)} B`, cx + 128, cy);
@@ -453,7 +492,7 @@
             const stAngleRad = (steering / 540) * (Math.PI * 0.5);
             ctx.beginPath();
             ctx.arc(cx, cy, 115, Math.PI * 1.25, Math.PI * 1.75);
-            ctx.strokeStyle = '#1a263c';
+            ctx.strokeStyle = isTheme18 ? '#222222' : '#1a263c';
             ctx.lineWidth = 4;
             ctx.stroke();
 
@@ -464,14 +503,14 @@
 
             ctx.beginPath();
             ctx.arc(stDotX, stDotY, 7, 0, Math.PI * 2);
-            ctx.fillStyle = '#00f0ff';
-            ctx.shadowColor = '#00f0ff';
-            ctx.shadowBlur = 10;
+            ctx.fillStyle = colorSteering;
+            ctx.shadowColor = colorSteering;
+            ctx.shadowBlur = isTheme18 ? 4 : 10;
             ctx.fill();
             ctx.shadowBlur = 0;
 
             // Steering Angle Text
-            ctx.fillStyle = '#8a99ad';
+            ctx.fillStyle = colorTextMuted;
             ctx.font = 'bold 14px sans-serif';
             ctx.textAlign = 'center';
             const stText = steering === 0 ? "ST: 0°" : (steering > 0 ? `ST: ${Math.round(steering)}° R` : `ST: ${Math.round(Math.abs(steering))}° L`);
@@ -483,21 +522,21 @@
             ctx.textAlign = 'center';
             ctx.fillText(Math.round(speed), cx, cy + 25);
 
-            ctx.fillStyle = '#8a99ad';
+            ctx.fillStyle = colorTextMuted;
             ctx.font = 'bold 16px sans-serif';
             ctx.fillText('KM/H', cx, cy + 55);
 
             // 7. Coolant Temp Badge & Gear
             const isOverheat = temp > 105;
-            ctx.fillStyle = isOverheat ? '#ff3366' : '#ff9900';
+            ctx.fillStyle = isOverheat ? (isTheme18 ? '#ffffff' : '#ff3366') : (isTheme18 ? '#DBCFCF' : '#ff9900');
             ctx.font = 'bold 18px sans-serif';
             ctx.fillText(`🌡️ ${Math.round(temp)}°C`, cx - 55, cy + 115);
 
             // Gear Badge
             ctx.beginPath();
             ctx.arc(cx + 65, cy + 110, 22, 0, Math.PI * 2);
-            ctx.fillStyle = '#141b2d';
-            ctx.strokeStyle = '#00f0ff';
+            ctx.fillStyle = isTheme18 ? '#141414' : '#141b2d';
+            ctx.strokeStyle = isTheme18 ? '#ffffff' : '#00f0ff';
             ctx.lineWidth = 2;
             ctx.fill();
             ctx.stroke();

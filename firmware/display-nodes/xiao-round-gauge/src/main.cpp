@@ -496,6 +496,7 @@ void setup() {
         lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x0b0f19), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
     }
+
     lv_obj_t* widgets[] = {
         objects.rpm_level_arc, objects.brake_pressure_arc, objects.gas_pedal_arc,
         objects.speed_value, objects.speed_type_label, objects.gas_pedal_value,

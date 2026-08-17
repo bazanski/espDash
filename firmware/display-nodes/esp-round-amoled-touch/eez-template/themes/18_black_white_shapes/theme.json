@@ -1,0 +1,30 @@
+{
+  "name": "Theme 18 - The Black White Shapes",
+  "id": "theme_18_black_white_shapes",
+  "version": "1.0.0",
+  "description": "Monochrome high-contrast shapes theme from EEZ Studio Dashboard Styles #18",
+  "source": "https://github.com/eez-open/studio-dashboard-styles/tree/main/18",
+  "colors": {
+    "bg_color": "#000000",
+    "card_bg": "#121212",
+    "accent_primary": "#DBCFCF",
+    "accent_secondary": "#9A9797",
+    "text_main": "#FFFFFF",
+    "text_muted": "#9A9797",
+    "border_color": "#FFFFFF",
+    "rpm_arc": "#DBCFCF",
+    "throttle_arc": "#FFFFFF",
+    "brake_arc": "#9A9797",
+    "alert_redline": "#FFFFFF"
+  },
+  "typography": {
+    "font_regular": "fonts/arial.ttf",
+    "font_bold": "fonts/arialbd.ttf"
+  },
+  "assets": {
+    "preview": "18_preview.jpg",
+    "svg": "SVG/svg_18.svg",
+    "illustration": "images/illo.jpg",
+    "odt": "RGB/Type 18_RGB.odt"
+  }
+}
