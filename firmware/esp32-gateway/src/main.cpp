@@ -288,7 +288,9 @@ static void apply_demo(CanDecodeState *s, float sim_t) {
     s->oil_temp_x10    = (int16_t)((92.0f + 4.0f * sinf(sim_t * 0.08f)) * 10.0f);
     s->battery_mv      = (uint16_t)((13.8f + 0.3f * sinf(sim_t * 0.5f)) * 1000.0f);
     s->gear            = gear_idx;
-    s->fuel_consumption_x10 = 85;   // demo: 8.5 L/100km
+    s->fuel_consumption_x10 = (uint8_t)constrain((int)(30.0f + (throt / 100.0f) * 120.0f + sinf(sim_t * 0.5f) * 20.0f), 0, 250);
+    s->fuel_instant_x10     = s->fuel_consumption_x10;
+    s->fuel_avg_x10         = 125;   // demo: 12.5 L/100km average
     s->throttle_pct    = throt;
     s->steering_deg    = steer;
     s->ambient_temp    = 23;
@@ -940,6 +942,7 @@ static void publishTask(void *arg) {
             t->wheel_fr_x10    = snap.wheel_fr_x10;
             t->wheel_rl_x10    = snap.wheel_rl_x10;
             t->wheel_rr_x10    = snap.wheel_rr_x10;
+            t->fuel_avg_x10    = snap.fuel_avg_x10;
 
             // peer.channel = 0 makes ESP-NOW follow the station's current
             // channel. With ESPDASH_GATEWAY_WIFI=0 (the default) that channel
@@ -967,7 +970,8 @@ static void publishTask(void *arg) {
             snprintf(json_buf, sizeof(json_buf),
                 "{\"type\":\"telemetry\",\"mac\":\"%s\",\"rpm\":%u,\"speed\":%.1f,"
                 "\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,"
-                "\"fuel_consumption_x10\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
+                "\"fuel_consumption_x10\":%u,\"fuel_instant_l100\":%.1f,\"fuel_avg_l100\":%.1f,"
+                "\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
                 "\"tc\":%s,\"brake_sw\":%s,\"cel\":%s,\"vsa_warn\":%s,\"w_fl\":%.1f,"
                 "\"w_fr\":%.1f,\"w_rl\":%.1f,\"w_rr\":%.1f,\"ambient\":%d,"
                 "\"dropped\":%lu,\"timestamp\":%lu}\n",
@@ -979,6 +983,8 @@ static void publishTask(void *arg) {
                 snap.battery_mv / 1000.0f,
                 (snap.gear == 0xFF) ? 0 : snap.gear,
                 snap.fuel_consumption_x10,
+                snap.fuel_instant_x10 / 10.0f,
+                snap.fuel_avg_x10 / 10.0f,
                 snap.throttle_pct,
                 snap.steering_deg,
                 snap.brake_pct,

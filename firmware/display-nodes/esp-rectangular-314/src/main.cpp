@@ -9,6 +9,11 @@
 #include <esp_wifi.h>
 
 #include "bsp/sdcard_bsp.h"
+#include "bsp/qmi8658_bsp.h"
+#include "config_sensors.h"
+#include "tpms_parser.h"
+#include "tpms_gui.h"
+#include "gforce_gui.h"
 #include "canlog.h"
 #include "ui/screens.h"
 #include "ui/ui.h"
@@ -307,6 +312,20 @@ static lv_chart_series_t *ser_brake = NULL;
 static lv_chart_series_t *ser_speed = NULL;
 static uint16_t current_speed_ymax = 60;
 
+// 3 Multi-Screen Telemetry Cockpit
+enum DisplayScreenIndex {
+  SCREEN_MAIN = 0,
+  SCREEN_TPMS = 1,
+  SCREEN_GFORCE = 2,
+  SCREEN_COUNT = 3
+};
+
+static lv_obj_t *scr_tpms = nullptr;
+static lv_obj_t *scr_gforce = nullptr;
+static uint8_t current_screen_index = SCREEN_MAIN;
+static uint32_t last_screen_switch_ms = 0;
+#define SCREEN_CYCLE_INTERVAL_MS 10000 // 10 seconds auto-switch
+
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -317,6 +336,7 @@ void setup() {
       " 🏎️ espDash Waveshare ESP32-S3-LCD-3.16 (Racelab Telemetry Display)");
   Serial.println(" DISPLAY: ST7701 RGB Parallel 820x320 LCD (Landscape)");
   Serial.println(" NODE: esp-rectangular-314");
+  Serial.println(" SCREENS: 3-Screen Auto-Cycle (Main / TPMS / G-Force)");
   Serial.println(
       "=================================================================");
 
@@ -334,14 +354,35 @@ void setup() {
   rec_button_init();
   canlog_init(); // mounts SD, allocates PSRAM ring, starts writer task
 
+  // Initialize QMI8658 6-Axis IMU for G-Force Meter
+  if (!qmi8658_init()) {
+    Serial.println("[IMU] Warning: QMI8658 IMU init failed / not responding");
+  } else {
+    Serial.println("[IMU] QMI8658 IMU initialized successfully");
+  }
+
+  // Initialize NimBLE TPMS Receiver for Tire Pressure/Temperature
+  tpms_init();
+
   // Setup WiFi Radio for ESP-NOW (No WiFi association overhead)
   WiFi.disconnect(true, true);
   WiFi.mode(WIFI_STA);
   esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-  // Lock LVGL mutex to build EEZ Studio UI & configure chart
+  // Lock LVGL mutex to build EEZ Studio UI, TPMS, and G-Force screens
   if (lvgl_port_lock(500)) {
-    ui_init();
+    ui_init(); // Screen 1: Main EEZ UI
+
+    // Screen 2: TPMS Cockpit
+    scr_tpms = create_tpms_gui();
+
+    // Screen 3: G-Force Meter
+    scr_gforce = create_gforce_gui();
+
+    // Load initial screen (Main)
+    if (objects.main) {
+      lv_scr_load(objects.main);
+    }
 
     // Set dark background matching Racelab telemetry aesthetic
     if (objects.main) {
@@ -416,8 +457,8 @@ void setup() {
     lvgl_port_unlock();
   }
 
-  // Register ESP-NOW Receiver Callback
-  esp_wifi_set_ps(WIFI_PS_NONE);
+  // Register ESP-NOW Receiver Callback (modem sleep is required for Wi-Fi + BLE coexistence)
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(OnDataRecv);
 
@@ -490,6 +531,36 @@ void loop() {
   }
 #endif
 
+  // Read IMU G-Force continuous data
+  GForceData gdata = qmi8658_read_gforce();
+
+  // 10-Second Automatic Screen Rotation (Main -> TPMS -> G-Force -> Main)
+  if (now - last_screen_switch_ms >= SCREEN_CYCLE_INTERVAL_MS) {
+    last_screen_switch_ms = now;
+    current_screen_index = (current_screen_index + 1) % SCREEN_COUNT;
+    if (lvgl_port_lock(20)) {
+      switch (current_screen_index) {
+        case SCREEN_MAIN:
+          if (objects.main) {
+            lv_scr_load_anim(objects.main, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+          }
+          break;
+        case SCREEN_TPMS:
+          if (scr_tpms) {
+            lv_scr_load_anim(scr_tpms, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+          }
+          break;
+        case SCREEN_GFORCE:
+          if (scr_gforce) {
+            lv_scr_load_anim(scr_gforce, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+            qmi8658_auto_calibrate();
+          }
+          break;
+      }
+      lvgl_port_unlock();
+    }
+  }
+
   // Link Supervision & Demo Mode Generation
   bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
   LinkState link =
@@ -516,7 +587,8 @@ void loop() {
                     sin(phase * 0.8f) * 20) *
                    10); // 15 - 120 km/h sweep
     active_pkt.water_temp_x10 = 920;
-    active_pkt.fuel_pct = 82;
+    active_pkt.fuel_consumption_x10 = 82;
+    active_pkt.fuel_avg_x10 = 125;
     active_pkt.battery_mv = 13800;
     active_pkt.gear = (uint8_t)(1 + ((int)(now * 0.0004f) % 6));
   } else {
@@ -596,6 +668,12 @@ void loop() {
         lv_bar_set_value(objects.rpm_bar, rpm_clamped, LV_ANIM_OFF);
         prev_rpm = rpm_clamped;
       }
+
+      // Update TPMS Cockpit Screen widgets
+      update_tpms_gui();
+
+      // Update G-Force Meter Screen widgets
+      update_gforce_gui(gdata);
 
       rec_label_update();
 

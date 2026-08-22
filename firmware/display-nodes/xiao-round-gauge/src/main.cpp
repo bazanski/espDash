@@ -193,6 +193,58 @@ static const char* get_gear_str(uint8_t g) {
 }
 
 // =========================================================================
+// CIVIC 9G 1.8L ECO-COACHING COLOR LOGIC (AMOLED THEME INTEGRATION)
+// =========================================================================
+static uint32_t get_civic_rpm_color(uint16_t rpm) {
+    if (rpm <= 2500) return 0x00e676; // Bright Green
+    else if (rpm <= 3500) return 0x00e5ff; // Cyan
+    else if (rpm <= 4800) return 0xffd600; // Yellow
+    else if (rpm <= 6200) return 0xff9100; // Orange
+    else return 0xff1744; // Red
+}
+
+static uint32_t get_civic_throttle_color(uint8_t thr_pct) {
+    if (thr_pct <= 25) return 0x00e676; // Bright Green
+    else if (thr_pct <= 45) return 0xffd600; // Gold / Yellow
+    else if (thr_pct <= 70) return 0xff9100; // Orange
+    else return 0xff1744; // Red
+}
+
+static uint32_t get_civic_efficiency_color(float l_per_100km) {
+    if (l_per_100km <= 6.5f) return 0x00e676; // Bright Pure Green
+    else if (l_per_100km <= 8.8f) return 0x76ff03; // Lime Green
+    else if (l_per_100km <= 12.5f) return 0xffd600; // Gold / Yellow
+    else if (l_per_100km <= 16.5f) return 0xff9100; // Orange
+    else return 0xff1744; // Vivid Red
+}
+
+static void setup_arc_style(lv_obj_t *arc, int16_t range_min, int16_t range_max, uint32_t track_color, uint32_t indic_color, lv_coord_t arc_w) {
+    if (!arc) return;
+    lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_outline_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(arc, 0, LV_PART_MAIN);
+
+    // Track arc
+    lv_obj_set_style_arc_color(arc, lv_color_hex(track_color), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, arc_w, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(arc, true, LV_PART_MAIN);
+
+    // Active indicator arc
+    lv_obj_set_style_arc_color(arc, lv_color_hex(indic_color), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc, arc_w, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(arc, true, LV_PART_INDICATOR);
+
+    // Hide knob handle completely
+    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_border_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_shadow_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(arc, 0, LV_PART_KNOB);
+}
+
+// =========================================================================
 // DRAW GAUGES ON 240x240 CIRCULAR DISPLAY SPRITE
 // =========================================================================
 void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
@@ -306,11 +358,11 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.drawString(String((int)waterC) + "°C", cx - 48, cy + 62);
 
     // 8. Fuel Level Badge (Bottom Center)
-    uint8_t fuel = pkt.fuel_pct;
-    bool isLowFuel = fuel <= 15;
-    spr.setTextColor(isLowFuel ? COLOR_RED : COLOR_GREEN, COLOR_BG);
+    uint8_t fuel_x10 = pkt.fuel_consumption_x10;
+    bool isHighCons = fuel_x10 >= 150;
+    spr.setTextColor(isHighCons ? COLOR_RED : COLOR_GREEN, COLOR_BG);
     spr.setTextDatum(MC_DATUM);
-    spr.drawString("F:" + String(fuel) + "%", cx, cy + 62);
+    spr.drawString(String(fuel_x10 / 10) + "." + String(fuel_x10 % 10) + "L", cx, cy + 62);
 
     // 9. Gear Indicator Badge (Bottom Right)
     const char* gearStr = "N";
@@ -491,19 +543,35 @@ void setup() {
 
     ui_init();
 
-    // Ensure matching dark background (#0b0f19) & remove ugly widget boxes
+    // Ensure pure OLED dark background (#000000) matching AMOLED theme
     if (objects.main) {
-        lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x0b0f19), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x000000), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_clear_flag(objects.main, LV_OBJ_FLAG_SCROLLABLE);
     }
 
+    // Apply sleek AMOLED arc styling (track color #161b26 with rounded ends)
+    setup_arc_style(objects.rpm_level_arc, 0, 8000, 0x161b26, 0x00e676, 8);
+    setup_arc_style(objects.gas_pedal_arc, 0, 100, 0x161b26, 0x00e676, 6);
+    setup_arc_style(objects.brake_pressure_arc, 0, 100, 0x161b26, 0x00e5ff, 6);
+
+    // Speed value & label styling
+    if (objects.speed_value) {
+        lv_obj_clear_flag(objects.speed_value, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_color(objects.speed_value, lv_color_hex(0xffffff), LV_PART_MAIN);
+    }
+    if (objects.speed_type_label) {
+        lv_obj_clear_flag(objects.speed_type_label, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_color(objects.speed_type_label, lv_color_hex(0x00e5ff), LV_PART_MAIN);
+    }
+
+    // Clean transparent styling for all widgets
     lv_obj_t* widgets[] = {
-        objects.rpm_level_arc, objects.brake_pressure_arc, objects.gas_pedal_arc,
         objects.speed_value, objects.speed_type_label, objects.gas_pedal_value,
         objects.brake_pressure_value, objects.battery_voltage_value,
         objects.coolant_temp_value, objects.fuel_level_value, objects.gear_value
     };
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 8; i++) {
         if (widgets[i]) {
             lv_obj_set_style_bg_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
             lv_obj_set_style_border_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
@@ -511,6 +579,12 @@ void setup() {
             lv_obj_set_style_shadow_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
         }
     }
+    if (objects.gas_pedal_value) lv_obj_set_style_text_color(objects.gas_pedal_value, lv_color_hex(0x00e676), LV_PART_MAIN);
+    if (objects.brake_pressure_value) lv_obj_set_style_text_color(objects.brake_pressure_value, lv_color_hex(0x00e5ff), LV_PART_MAIN);
+    if (objects.battery_voltage_value) lv_obj_set_style_text_color(objects.battery_voltage_value, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
+    if (objects.coolant_temp_value) lv_obj_set_style_text_color(objects.coolant_temp_value, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
+    if (objects.fuel_level_value) lv_obj_set_style_text_color(objects.fuel_level_value, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
+    if (objects.gear_value) lv_obj_set_style_text_color(objects.gear_value, lv_color_hex(0xffd600), LV_PART_MAIN);
 
     // ESP-NOW Setup
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -570,7 +644,7 @@ void loop() {
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
         active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.fuel_pct = (uint8_t)(75 + sin(phase * 0.1f) * 20);
+        active_pkt.fuel_consumption_x10 = (uint8_t)(85 + sin(phase * 0.1f) * 20);
         active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000); // Dynamic 11.2V - 14.8V sweep
         active_pkt.gear = (uint8_t)(5 + ((int)(now * 0.0004f) % 6));
     } else {
@@ -617,13 +691,40 @@ void loop() {
     if (active_screen == 1) {
         ui_tick();
 
+        static uint32_t last_rpm_col = 0;
+        static uint32_t last_thr_col = 0;
+        static uint32_t last_brk_col = 0;
+
+        uint32_t rpm_col = get_civic_rpm_color(active_pkt.rpm);
+        uint32_t thr_col = get_civic_throttle_color(active_pkt.throttle_pct);
+        bool brake_active = (active_pkt.flags & ESPDASH_FLAG_BRAKE_SWITCH) || (active_pkt.brake_pct > 0);
+        uint32_t brk_col = brake_active ? 0xff1744 : 0x00e5ff;
+
         // Screen 1: Update EEZ Studio LVGL Widgets with 20Hz Telemetry & Demo Sweep
         if (objects.rpm_level_arc) lv_arc_set_value(objects.rpm_level_arc, active_pkt.rpm);
+        if (rpm_col != last_rpm_col) {
+            last_rpm_col = rpm_col;
+            if (objects.rpm_level_arc) lv_obj_set_style_arc_color(objects.rpm_level_arc, lv_color_hex(rpm_col), LV_PART_INDICATOR);
+        }
+
         if (objects.speed_value) lv_label_set_text_fmt(objects.speed_value, "%d", active_pkt.speed_kmh_x10 / 10);
+
         if (objects.gas_pedal_arc) lv_arc_set_value(objects.gas_pedal_arc, active_pkt.throttle_pct);
         if (objects.gas_pedal_value) lv_label_set_text_fmt(objects.gas_pedal_value, "%d%%", active_pkt.throttle_pct);
+        if (thr_col != last_thr_col) {
+            last_thr_col = thr_col;
+            if (objects.gas_pedal_arc) lv_obj_set_style_arc_color(objects.gas_pedal_arc, lv_color_hex(thr_col), LV_PART_INDICATOR);
+            if (objects.gas_pedal_value) lv_obj_set_style_text_color(objects.gas_pedal_value, lv_color_hex(thr_col), LV_PART_MAIN);
+        }
+
         if (objects.brake_pressure_arc) lv_arc_set_value(objects.brake_pressure_arc, active_pkt.brake_pct);
         if (objects.brake_pressure_value) lv_label_set_text_fmt(objects.brake_pressure_value, "%d%%", active_pkt.brake_pct);
+        if (brk_col != last_brk_col) {
+            last_brk_col = brk_col;
+            if (objects.brake_pressure_arc) lv_obj_set_style_arc_color(objects.brake_pressure_arc, lv_color_hex(brk_col), LV_PART_INDICATOR);
+            if (objects.brake_pressure_value) lv_obj_set_style_text_color(objects.brake_pressure_value, lv_color_hex(brk_col), LV_PART_MAIN);
+        }
+
         if (objects.battery_voltage_value) {
             uint16_t mv = active_pkt.battery_mv;
             if (mv > 0) {
@@ -632,8 +733,16 @@ void loop() {
                 lv_label_set_text(objects.battery_voltage_value, "--.-V");
             }
         }
-        if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
-        if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
+        if (objects.coolant_temp_value) {
+            float c = active_pkt.water_temp_x10 / 10.0f;
+            lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", (int)c);
+            lv_obj_set_style_text_color(objects.coolant_temp_value, lv_color_hex(c > 105.0f ? 0xff1744 : 0x8c9eb5), LV_PART_MAIN);
+        }
+        if (objects.fuel_level_value) {
+            uint8_t f = active_pkt.fuel_consumption_x10;
+            lv_label_set_text_fmt(objects.fuel_level_value, "%d.%dL", f / 10, f % 10);
+            lv_obj_set_style_text_color(objects.fuel_level_value, lv_color_hex(get_civic_efficiency_color(f / 10.0f)), LV_PART_MAIN);
+        }
         if (objects.gear_value) lv_label_set_text(objects.gear_value, get_gear_str(active_pkt.gear));
 
         lv_timer_handler();

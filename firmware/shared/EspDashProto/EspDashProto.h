@@ -29,7 +29,7 @@
 
 #define ESPDASH_MAGIC       0xED
 #define ESPDASH_PROTO_MAJOR 2
-#define ESPDASH_PROTO_MINOR 1
+#define ESPDASH_PROTO_MINOR 2
 
 // Fixed 2.4 GHz channel for ESP-NOW when a device never associates to Wi-Fi.
 // Only channels 1/6/11 are non-overlapping (WiFi channels are ~22 MHz wide on
@@ -85,6 +85,8 @@ typedef struct __attribute__((packed)) {
     uint16_t wheel_fr_x10;
     uint16_t wheel_rl_x10;
     uint16_t wheel_rr_x10;
+    // ---- added in v2.2 --------------------------------------------------
+    uint8_t  fuel_avg_x10;   // average fuel consumption, L/100km x10 (125=12.5), converted from 0x324 km/L
 } EspDashTelemetry;
 
 // Flag bits. Keep in sync with the JSON booleans the web dashboard reads.
@@ -123,8 +125,8 @@ static_assert(offsetof(EspDashTelemetry, flags)           == 15, "v2.0 layout fr
 static_assert(offsetof(EspDashTelemetry, throttle_pct)    == 16, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, brake_pct)       == 17, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, timestamp_ms)    == 18, "v2.0 layout frozen");
-// Appended in v2.1. Bump this deliberately when you append more.
-static_assert(sizeof(EspDashTelemetry) == 30, "size changed - bump PROTO_MINOR");
+// Appended in v2.1 & v2.2. Bump this deliberately when you append more.
+static_assert(sizeof(EspDashTelemetry) == 31, "size changed - bump PROTO_MINOR");
 #endif
 
 // Validate a received ESP-NOW buffer. Returns a pointer to the telemetry body

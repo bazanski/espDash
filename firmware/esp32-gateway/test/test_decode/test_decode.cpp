@@ -35,6 +35,7 @@ typedef struct {
     int16_t steer_min, steer_max;
     float coolant_min, coolant_max;
     float fuel_min, fuel_max;
+    float fuel_avg_min, fuel_avg_max;
     float batt_min, batt_max;
     int   ambient_min, ambient_max;
     uint8_t brake_min, brake_max;
@@ -52,6 +53,7 @@ static void stats_init(ReplayStats *s) {
     s->steer_min = 32767; s->steer_max = -32768;
     s->coolant_min = 1e9f; s->coolant_max = -1e9f;
     s->fuel_min = 1e9f; s->fuel_max = -1e9f;
+    s->fuel_avg_min = 1e9f; s->fuel_avg_max = -1e9f;
     s->batt_min = 1e9f; s->batt_max = -1e9f;
     s->ambient_min = 127; s->ambient_max = -128;
     s->brake_min = 255;
@@ -135,6 +137,8 @@ static bool replay(const char *name, ReplayStats *out, bool moving_only) {
         if (st.last_update_ms[SIG_FUEL_CONSUMPTION]) {
             if (st.fuel_consumption_x10 < out->fuel_min) out->fuel_min = st.fuel_consumption_x10;
             if (st.fuel_consumption_x10 > out->fuel_max) out->fuel_max = st.fuel_consumption_x10;
+            if (st.fuel_avg_x10 < out->fuel_avg_min) out->fuel_avg_min = st.fuel_avg_x10;
+            if (st.fuel_avg_x10 > out->fuel_avg_max) out->fuel_avg_max = st.fuel_avg_x10;
         }
         if (st.battery_mv) {
             float v = st.battery_mv / 1000.0f;
@@ -276,15 +280,10 @@ static void test_user_2014_capture_regression(void) {
 
     // Dash-verified against the instrument cluster; these are the anchors.
     TEST_ASSERT_TRUE(s.coolant_min >= 82.0f && s.coolant_max <= 88.0f);
-    // This fixture is a stationary/idle capture (2026-08-08). It is NOT a
-    // dash-verified anchor for fuel like the others here - it was originally
-    // written as one, decoding byte1/2 as fuel level %, before a 2026-08-15
-    // real drive with no refuel proved that formula wrong at the absolute
-    // value, not just noisy (see CAN_PROTOCOL_MAP.md). Re-pinned to the raw
-    // byte the fixture actually contains (101-102), now understood as instant
-    // consumption x10 L/100km - a plausible idle-range reading (10.1-10.2),
-    // not a claim this fixture proves the formula, only a regression guard.
-    TEST_ASSERT_TRUE(s.fuel_min >= 100.0f && s.fuel_max <= 103.0f);
+    // This fixture is a stationary/idle capture (2026-08-08) where 0x324 byte 1
+    // contains raw 101-102 (10.1-10.2 km/L). Converted to European average fuel
+    // consumption (10000 / km_l_x10) this yields 98-99 (9.8-9.9 L/100km).
+    TEST_ASSERT_TRUE(s.fuel_avg_min >= 95.0f && s.fuel_avg_max <= 105.0f);
     TEST_ASSERT_TRUE(s.batt_min >= 14.0f && s.batt_max <= 14.4f);
 
     // Ambient now comes from 0x21E byte 4 only. 0x372 is a flag, not a
@@ -445,6 +444,109 @@ static void test_flags(void) {
     TEST_ASSERT_EQUAL_UINT8(0x80, can_decode_flags(&st) & 0x80);
 }
 
+static void test_fuel_avg_conversion(void) {
+    CanDecodeState st;
+    can_decode_init(&st);
+    CanFrame f;
+    memset(&f, 0, sizeof(f));
+    f.id = 0x324; f.dlc = 8;
+    f.data[0] = 125; // 85 C
+
+    // Case 1: 8.0 km/L (raw 80) -> 12.5 L/100km (125 x10)
+    f.data[1] = 80;
+    f.data[7] = honda_checksum(0x324, f.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 10));
+    TEST_ASSERT_EQUAL_UINT8(80, st.raw_fuel_km_l_x10);
+    TEST_ASSERT_EQUAL_UINT8(125, st.fuel_avg_x10);
+
+    // Case 2: 7.5 km/L (raw 75) -> 13.3 L/100km (133 x10)
+    f.data[1] = 75;
+    f.data[7] = honda_checksum(0x324, f.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 20));
+    TEST_ASSERT_EQUAL_UINT8(133, st.fuel_avg_x10);
+
+    // Case 3: 10.0 km/L (raw 100) -> 10.0 L/100km (100 x10)
+    f.data[1] = 100;
+    f.data[7] = honda_checksum(0x324, f.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 30));
+    TEST_ASSERT_EQUAL_UINT8(100, st.fuel_avg_x10);
+
+    // Case 4: 12.5 km/L (raw 125) -> 8.0 L/100km (80 x10)
+    f.data[1] = 125;
+    f.data[7] = honda_checksum(0x324, f.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 40));
+    TEST_ASSERT_EQUAL_UINT8(80, st.fuel_avg_x10);
+
+    // Case 5: 23.8 km/L (raw 238) -> 4.2 L/100km (42 x10)
+    f.data[1] = 238;
+    f.data[7] = honda_checksum(0x324, f.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 50));
+    TEST_ASSERT_EQUAL_UINT8(42, st.fuel_avg_x10);
+}
+
+static void test_fuel_instant_calculation(void) {
+    CanDecodeState st;
+    can_decode_init(&st);
+    CanFrame f158, f17c;
+    memset(&f158, 0, sizeof(f158));
+    memset(&f17c, 0, sizeof(f17c));
+    f158.id = 0x158; f158.dlc = 8;
+    f17c.id = 0x17C; f17c.dlc = 8;
+
+    // Case 1: Idle (750 RPM, 0% throttle, 0 km/h) -> ~8 (0.8 L/h)
+    f17c.data[0] = 0;   // 0% throttle
+    f17c.data[2] = (750 >> 8) & 0xFF; f17c.data[3] = 750 & 0xFF;
+    f17c.data[7] = honda_checksum(0x17C, f17c.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f17c, 10));
+
+    f158.data[0] = 0; f158.data[1] = 0; // 0 km/h
+    f158.data[7] = honda_checksum(0x158, f158.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f158, 20));
+
+    TEST_ASSERT_TRUE(st.fuel_instant_x10 >= 6 && st.fuel_instant_x10 <= 10);
+    TEST_ASSERT_EQUAL_UINT8(st.fuel_instant_x10, st.fuel_consumption_x10);
+
+    // Case 2: Cruising at 60 km/h (2000 RPM, 15% throttle) -> ~5.2 L/100km (52 x10)
+    // throttle raw = 15% * 139 = 21
+    f17c.data[0] = 21;
+    f17c.data[2] = (2000 >> 8) & 0xFF; f17c.data[3] = 2000 & 0xFF;
+    f17c.data[7] = honda_checksum(0x17C, f17c.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f17c, 30));
+
+    // 60 km/h -> raw = 6000
+    f158.data[0] = (6000 >> 8) & 0xFF; f158.data[1] = 6000 & 0xFF;
+    f158.data[7] = honda_checksum(0x158, f158.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f158, 40));
+
+    TEST_ASSERT_TRUE(st.fuel_instant_x10 >= 45 && st.fuel_instant_x10 <= 60);
+
+    // Case 3: Acceleration at 80 km/h (3500 RPM, 60% throttle) -> ~15.3 L/100km (153 x10)
+    // throttle raw = 60% * 139 = 83
+    f17c.data[0] = 83;
+    f17c.data[2] = (3500 >> 8) & 0xFF; f17c.data[3] = 3500 & 0xFF;
+    f17c.data[7] = honda_checksum(0x17C, f17c.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f17c, 50));
+
+    // 80 km/h -> raw = 8000
+    f158.data[0] = (8000 >> 8) & 0xFF; f158.data[1] = 8000 & 0xFF;
+    f158.data[7] = honda_checksum(0x158, f158.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f158, 60));
+
+    TEST_ASSERT_TRUE(st.fuel_instant_x10 >= 140 && st.fuel_instant_x10 <= 170);
+
+    // Case 4: DFCO on Deceleration (2500 RPM, 0% throttle, 70 km/h) -> 0 L/100km
+    f17c.data[0] = 0;
+    f17c.data[2] = (2500 >> 8) & 0xFF; f17c.data[3] = 2500 & 0xFF;
+    f17c.data[7] = honda_checksum(0x17C, f17c.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f17c, 70));
+
+    f158.data[0] = (7000 >> 8) & 0xFF; f158.data[1] = 7000 & 0xFF;
+    f158.data[7] = honda_checksum(0x158, f158.data, 8);
+    TEST_ASSERT_TRUE(can_decode_frame(&st, &f158, 80));
+
+    TEST_ASSERT_EQUAL_UINT8(0, st.fuel_instant_x10);
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -462,5 +564,7 @@ int main(void) {
     RUN_TEST(test_staleness);
     RUN_TEST(test_gear_mapping);
     RUN_TEST(test_flags);
+    RUN_TEST(test_fuel_avg_conversion);
+    RUN_TEST(test_fuel_instant_calculation);
     return UNITY_END();
 }

@@ -50,10 +50,10 @@ typedef struct {
     int16_t  oil_temp_x10;      // never set from CAN - see note at bottom
     uint16_t battery_mv;
     uint8_t  gear;              // 0=P 1=R 2=N 3=D 4=S
-    uint8_t  fuel_consumption_x10; // instant consumption, L/100km x10 (94 = 9.4).
-                                    // NOT tank level - that byte was misread as
-                                    // fuel % until 2026-08-15; see CAN_PROTOCOL_MAP.md.
-                                    // Tank level is unmapped.
+    uint8_t  fuel_consumption_x10; // instant consumption, L/100km x10 (125 = 12.5). Wire-compat mirror of fuel_instant_x10
+    uint8_t  fuel_instant_x10;     // computed instant consumption, L/100km x10 (0..250 = 0.0..25.0 L/100km)
+    uint8_t  fuel_avg_x10;         // average fuel consumption, L/100km x10, converted from 0x324 km/L
+    uint8_t  raw_fuel_km_l_x10;    // raw 0x324 byte 1 (km/L x10)
     int16_t  steering_deg;      // negative = left
     int16_t  steering_rate_dps;
     int8_t   ambient_temp;

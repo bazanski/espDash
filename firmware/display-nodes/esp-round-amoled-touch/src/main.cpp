@@ -398,9 +398,10 @@ void loop() {
         float thr_val = 38.0f + sinf(phase * 1.4f) * 32.0f;
         active_pkt.throttle_pct = (uint8_t)constrain((int)thr_val, 0, 100);
 
-        // Sweep fuel consumption across all target/warning bands (3.0 to 18.0 L/100km)
-        float eff_val = 85.0f + sinf(phase * 0.6f) * 70.0f;
+        // Dynamically simulate instant fuel consumption responsive to throttle and engine load
+        float eff_val = 35.0f + (active_pkt.throttle_pct / 100.0f) * 115.0f + sinf(phase * 1.5f) * 15.0f;
         active_pkt.fuel_consumption_x10 = (uint8_t)constrain((int)eff_val, 0, 200);
+        active_pkt.fuel_avg_x10         = 125; // 12.5 L/100km average
     } else {
         active_pkt = current_pkt;
     }
@@ -468,6 +469,20 @@ void loop() {
         last_eff_col = eff_col;
         if (objects.eff_arc) lv_obj_set_style_arc_color(objects.eff_arc, lv_color_hex(eff_col), LV_PART_INDICATOR);
         if (objects.eff_value) lv_obj_set_style_text_color(objects.eff_value, lv_color_hex(eff_col), LV_PART_MAIN);
+    }
+
+    // 5. Status / Average Fuel Readout ("AVG 12.5 L/100km")
+    static uint8_t last_disp_avg = 0xFF;
+    if (objects.status_label) {
+        uint8_t avg_val = (is_demo) ? active_pkt.fuel_avg_x10
+                                    : (ESPDASH_HAS(current_payload_len, fuel_avg_x10) ? active_pkt.fuel_avg_x10 : 0);
+        if (avg_val > 0 && avg_val != last_disp_avg) {
+            last_disp_avg = avg_val;
+            lv_label_set_text_fmt(objects.status_label, "AVG %u.%u L/100km", avg_val / 10, avg_val % 10);
+        } else if (avg_val == 0 && last_disp_avg != 0) {
+            last_disp_avg = 0;
+            lv_label_set_text(objects.status_label, "Efficiency Monitor");
+        }
     }
 
     // Handle LVGL UI ticking and rendering

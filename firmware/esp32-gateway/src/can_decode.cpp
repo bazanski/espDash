@@ -75,6 +75,40 @@ static inline void touch(CanDecodeState *st, enum CanSigGroup g, uint32_t now) {
     st->last_update_ms[g] = now;
 }
 
+// Update instantaneous fuel consumption (L/100km x10) from high-frequency RPM, Throttle, and Speed.
+// Atmospheric Honda R18 1.8L (1799 cc) physical model.
+static void can_decode_update_instant_fuel(CanDecodeState *st) {
+    if (st->rpm < 400) {
+        st->fuel_instant_x10 = 0;
+        st->fuel_consumption_x10 = 0;
+        return;
+    }
+
+    // Deceleration Fuel Cut-Off (DFCO): high rpm + zero throttle + rolling
+    if (st->rpm > 1200 && st->throttle_pct == 0 && st->speed_kmh_x10 > 50) {
+        st->fuel_instant_x10 = 0;
+        st->fuel_consumption_x10 = 0;
+        return;
+    }
+
+    // Fuel flow in Liters/Hour (Q_fuel):
+    // Throttle factor ranges from ~0.18 at idle to 1.00 at WOT
+    float thr_factor = 0.18f + 0.82f * (st->throttle_pct / 100.0f);
+    float q_fuel_lph = (st->rpm / 1000.0f) * 5.2f * thr_factor;
+
+    if (st->speed_kmh_x10 < 30) {
+        // Vehicle stationary / creeping (< 3.0 km/h):
+        // Report fuel flow in L/h x10 (e.g. 8 for 0.8 L/h idle)
+        st->fuel_instant_x10 = (uint8_t)clamp_i((int)(q_fuel_lph * 10.0f + 0.5f), 0, 250);
+    } else {
+        // Moving: Instant L/100km x10 = (Q_fuel / (Speed_kmh)) * 100 * 10 = (Q_fuel * 10000) / Speed_kmh_x10
+        float l100_x10 = (q_fuel_lph * 10000.0f) / (float)st->speed_kmh_x10;
+        st->fuel_instant_x10 = (uint8_t)clamp_i((int)(l100_x10 + 0.5f), 0, 250);
+    }
+    // Wire protocol compatibility mirror
+    st->fuel_consumption_x10 = st->fuel_instant_x10;
+}
+
 bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
     const uint8_t *d = f->data;
     const uint8_t dlc = f->dlc;
@@ -95,6 +129,7 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
         if (dlc >= 8) {
             st->speed_kmh_x10 = kph100_to_x10(be16(d, 0));
             touch(st, SIG_SPEED, now_ms);
+            can_decode_update_instant_fuel(st);
             // b2-3 also carries RPM, but it reads 0 on the 2015 Si trace while
             // 0x17C is populated on every car seen. 0x17C stays primary.
         } else hit = false;
@@ -112,6 +147,7 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
             touch(st, SIG_THROTTLE, now_ms);
             st->gas_pressed   = (d[4] & 0x80) != 0;  // bit 39
             st->brake_switch  = (d[4] & 0x01) != 0;  // bit 32
+            can_decode_update_instant_fuel(st);
         } else hit = false;
         break;
 
@@ -185,19 +221,10 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
         else hit = false;
         break;
 
-    // 0x324 - coolant temp and instant fuel consumption. opendbc labels this
-    // CRUISE/HUD_SPEED_KPH, but that would mean 125 km/h on a stationary car;
-    // coolant is dash-verified and gives 85-92 C on the Si trace.
-    //
-    // byte1 was originally decoded as fuel level % (d[1]/2) and marked
-    // CONFIRMED. That was wrong, not just noisy: a 49-min real outing with no
-    // refuel had the dash reading >90% -> >80% while this formula sat at
-    // 41-52% throughout, under any linear scale of the byte. Binned by speed
-    // the byte is smooth and monotonic instead - 92.4 raw at 0-10 km/h down
-    // to 80.0 at 90-100 km/h, ~zero correlation with short-term acceleration
-    // - the signature of instant consumption, not tank level. The raw byte
-    // IS the value, x10 L/100km (94 -> 9.4); no division needed. See
-    // docs/CAN_PROTOCOL_MAP.md for the full writeup. Tank level is unmapped.
+    // 0x324 - coolant temp and rolling average fuel economy.
+    // byte 0 = coolant temp (d[0] - 40 deg C).
+    // byte 1 = instrument cluster rolling trip average fuel economy in Japanese km/L x10 (e.g. 80 = 8.0 km/L).
+    //          Converted to European L/100km x10: (10000 + d[1]/2) / d[1] (e.g. 80 -> 125 = 12.5 L/100km).
     case 0x324:
         if (dlc >= 2) {
             if (d[0] > 0) {
@@ -207,8 +234,10 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
                     touch(st, SIG_COOLANT, now_ms);
                 }
             }
-            if (d[1] <= 200) {
-                st->fuel_consumption_x10 = d[1];
+            if (d[1] > 0 && d[1] <= 250) {
+                st->raw_fuel_km_l_x10 = d[1];
+                uint32_t avg_l100_x10 = ((uint32_t)10000 + (d[1] / 2)) / d[1];
+                st->fuel_avg_x10 = (uint8_t)clamp_i((int)avg_l100_x10, 0, 250);
                 touch(st, SIG_FUEL_CONSUMPTION, now_ms);
             }
         } else hit = false;
