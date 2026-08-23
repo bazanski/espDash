@@ -198,13 +198,13 @@ static void tpms_scan_task(void* pvParameters) {
     
     NimBLEScan* pScan = NimBLEDevice::getScan();
     pScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
-    pScan->setActiveScan(false);  // Passive scanning: no RF TX contention, receives broadcast TPMS payloads
-    pScan->setInterval(160);      // 160ms scan interval
-    pScan->setWindow(30);         // 30ms scan window (~18% BLE duty cycle, leaves 82% radio for ESP-NOW)
+    pScan->setActiveScan(true);   // Active scanning: required to request SCAN_RSP payload containing TPMS Manufacturer/Service Data
+    pScan->setInterval(120);      // 120ms scan interval
+    pScan->setWindow(50);         // 50ms scan window (41% BLE active scan, leaves 59% radio for ESP-NOW)
     pScan->setDuplicateFilter(false); // Process every incoming advertisement packet
     
     while (true) {
-        pScan->start(0, false); // Scan continuously with 18% duty cycle
+        pScan->start(0, false); // Scan continuously with 50ms/120ms active duty cycle
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
