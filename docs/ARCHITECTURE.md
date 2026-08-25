@@ -137,6 +137,13 @@ removal doesn't resolve it either.
 * **Node 4:** `esp32-gauge-147.local` (Waveshare ESP32-C6-LCD-1.47 — Universal Telemetry Display, Touch or Non-Touch TBD)
 * **Node 5:** `esp32-oled.local` (Generic ESP32-S3 + I2C OLED — Universal Gauge / Shift Light)
 * **Node 6:** `esp32-heltec-relay.local` (Heltec Meshtastic LoRa Bridge to Home Assistant)
+* **Node 7:** `esp32-gauge-dual-round.local` (Seeed XIAO ESP32-S3 + 2× GC9A01 240×240 round,
+  shared SPI bus — Dual Circular Gauge: Panel A driving / Panel B efficiency). The first
+  two-display node in the codebase: LVGL is configured for a single 240×480 virtual display,
+  and `flush_cb` splits each invalidated area across the two physical panels (rows 0–239 to
+  panel A, rows 240–479 to panel B) — see `firmware/display-nodes/xiao-dual-round/src/main.cpp`.
+  Node Wi-Fi/mDNS is not wired up on this node (always off), so the hostname above does not
+  currently resolve; listed for naming consistency with the rest of the fleet.
 
 ## 6. Display node UI sources (EEZ Studio)
 
@@ -148,6 +155,7 @@ by hand is lost on the next export. Edit the `.eez-project` and re-export.
 |---|---|
 | `esp-rectangular-314` | `/Users/kickoff_laptop/eez-projects/esp32-s3-lcd-3.16 gauges/esp32-s3-lcd-3.16 gauges.eez-project` |
 | `xiao-round-gauge` | `firmware/display-nodes/xiao-round-gauge/eez-template/xiao_round_gauge.eez-project` (in-repo) |
+| `xiao-dual-round` | *not yet created.* Will be a **240×480** project (not 240×240 — see §5 Node 7), covering both panels' widget trees in one export, and will live in-repo at `firmware/display-nodes/xiao-dual-round/eez-template/`, matching `xiao-round-gauge`'s convention. Until it exists, `firmware/display-nodes/xiao-dual-round/src/main.cpp` hand-codes a placeholder LVGL UI behind a `build_placeholder_ui()` function, commented with exactly what to delete and where `ui_init()`/`ui_tick()` slot in once the export lands. |
 
 The rectangular node's project lives **outside this repository**, so it is not
 version-controlled with the firmware that consumes it. Keep that in mind before
