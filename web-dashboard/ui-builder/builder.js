@@ -1,11 +1,88 @@
 /**
  * espDash UI Studio & Telemetry Builder Engine
  * 1-to-1 Pixel-Accurate ESP32 Display Simulator, Typography Studio & Visual Designer
+ * Full 50Hz LVGL 8.4 Export Ready
  */
 
 document.addEventListener('DOMContentLoaded', () => {
     // =========================================================================
-    // 1. DEVICE PRESETS CONFIGURATION
+    // 1. THEMES & COLOR PALETTES (ONE-CLICK THEME SWITCHER)
+    // =========================================================================
+    const THEMES = {
+        'civic-eco': {
+            name: 'Civic Eco (Green & Cyan)',
+            primary: '#00ff66',
+            secondary: '#00f0ff',
+            accent: '#ffcc00',
+            track: '#0c1e18',
+            bgCard: '#091618',
+            text: '#ffffff',
+            textMuted: '#8a99ad'
+        },
+        'type-r': {
+            name: 'Type-R (Championship Red & Carbon)',
+            primary: '#ff0033',
+            secondary: '#ffffff',
+            accent: '#ffcc00',
+            track: '#220008',
+            bgCard: '#140508',
+            text: '#ffffff',
+            textMuted: '#94a3b8'
+        },
+        'cyberpunk': {
+            name: 'Cyberpunk 2077 (Neon Pink & Cyan)',
+            primary: '#00f0ff',
+            secondary: '#ff007f',
+            accent: '#a855f7',
+            track: '#180b28',
+            bgCard: '#0e071c',
+            text: '#ffffff',
+            textMuted: '#c084fc'
+        },
+        'motorsport-gt3': {
+            name: 'Motorsport GT3 (Racing Yellow & Amber)',
+            primary: '#ffcc00',
+            secondary: '#ff6600',
+            accent: '#00f0ff',
+            track: '#261c08',
+            bgCard: '#161208',
+            text: '#ffffff',
+            textMuted: '#a3a3a3'
+        },
+        'stealth-oled': {
+            name: 'Stealth OLED (Pure Black & White)',
+            primary: '#ffffff',
+            secondary: '#8a99ad',
+            accent: '#00f0ff',
+            track: '#141414',
+            bgCard: '#0a0a0a',
+            text: '#ffffff',
+            textMuted: '#71717a'
+        },
+        'ice-titanium': {
+            name: 'Frozen Ice (Glacier Blue & Cold White)',
+            primary: '#38bdf8',
+            secondary: '#06b6d4',
+            accent: '#e0f2fe',
+            track: '#0c1e33',
+            bgCard: '#091626',
+            text: '#f8fafc',
+            textMuted: '#94a3b8'
+        },
+        'synthwave': {
+            name: 'Synthwave (Violet & Sunset Orange)',
+            primary: '#ff7700',
+            secondary: '#8b5cf6',
+            accent: '#f43f5e',
+            track: '#230c33',
+            bgCard: '#140820',
+            text: '#fdf4ff',
+            textMuted: '#d8b4fe'
+        }
+    };
+
+    // =========================================================================
+    // 2. DEVICE PRESETS CONFIGURATION
     // =========================================================================
     const DEVICE_PRESETS = {
         'amoled-454': {
@@ -74,11 +151,12 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // =========================================================================
-    // 2. APPLICATION STATE
+    // 3. APPLICATION STATE
     // =========================================================================
     const state = {
         currentPresetKey: 'amoled-454',
         preset: DEVICE_PRESETS['amoled-454'],
+        currentThemeKey: 'civic-eco',
         zoom: 1.0,
         gridSnap: true,
         gridSize: 8,
@@ -87,31 +165,34 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedWidgetId: null,
         draggingWidgetId: null,
         dragOffset: { x: 0, y: 0 },
-        isResizing: false,
-        resizeHandle: null,
         undoStack: [],
         redoStack: [],
         loadedCustomFonts: [],
-        activeExportTab: 'cpp', // 'cpp', 'lvgl', 'json'
+        activeExportTab: 'lvgl', // 'lvgl', 'cpp', 'json'
         telemetry: {
             rpm: 5400,
             speed_kmh: 118,
             gear: 4,
             throttle: 82,
             brake: 42,
+            boost_bar: 1.2,
             fuel_pct: 75,
             water_temp: 92,
+            oil_temp: 98,
             battery_v: 13.8,
             steering_deg: -15,
             lat_g: 0.45,
             long_g: 0.20,
+            heading_deg: 240,
+            lap_current: '1:34.82',
+            lap_best: '1:34.68',
+            lap_delta: '+0.14',
             tpms_fl: 2.3,
             tpms_fr: 2.3,
             tpms_rl: 2.2,
             tpms_rr: 2.2,
-            link_status: 'ESP-NOW 20Hz'
+            link_status: 'ESP-NOW 50Hz'
         },
-        gForceHistory: [],
         chartHistory: {
             rpm: [],
             speed: [],
@@ -119,11 +200,9 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         simSweepActive: false,
         simSweepTimer: null,
-        sweepStep: 0,
-        simMode: 'manual' // 'manual', 'sweep', 'lap'
+        sweepStep: 0
     };
 
-    // Initialize waveform buffers
     for (let i = 0; i < 40; i++) {
         state.chartHistory.rpm.push(4000 + Math.sin(i * 0.2) * 1500);
         state.chartHistory.speed.push(80 + Math.sin(i * 0.15) * 40);
@@ -131,13 +210,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 3. DOM ELEMENTS
+    // 4. DOM ELEMENTS
     // =========================================================================
     const canvas = document.getElementById('displayCanvas');
     const ctx = canvas.getContext('2d');
     const bezelFrame = document.getElementById('bezelFrame');
-    const overlay = document.getElementById('canvasOverlay');
     const presetSelect = document.getElementById('devicePresetSelect');
+    const themeSelect = document.getElementById('themeSelect');
     const inspectorContent = document.getElementById('inspectorContent');
     const inspectorTitle = document.getElementById('inspectorTitle');
     const layersList = document.getElementById('layersList');
@@ -151,7 +230,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.UIBuilder = state;
 
     // =========================================================================
-    // 4. CUSTOM FONT MANAGER
+    // 5. CUSTOM FONT MANAGER
     // =========================================================================
     const FONT_FAMILIES = [
         { label: 'Segment7 (7-Segment Digital)', value: 'Segment7, "DSEG7-Classic", monospace' },
@@ -183,27 +262,65 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('activeFontInfo').textContent = `Loaded Fonts: ${FONT_FAMILIES.length + state.loadedCustomFonts.length} families`;
             renderInspector();
             renderCanvas();
-            alert(`Font "${fontName}" loaded successfully and is ready to use on any widget!`);
+            alert(`Font "${fontName}" loaded successfully and ready to use!`);
         } catch (err) {
-            console.error("Font loading error:", err);
+            console.error("Font error:", err);
             alert(`Failed to load font: ${err.message}`);
         }
     }
 
-    if (fontFileInput) {
-        fontFileInput.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files[0]) {
-                loadCustomFontFile(e.target.files[0]);
-            }
-        });
-    }
+    fontFileInput?.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files[0]) {
+            loadCustomFontFile(e.target.files[0]);
+        }
+    });
 
     document.getElementById('uploadFontBtn')?.addEventListener('click', () => {
         fontFileInput.click();
     });
 
     // =========================================================================
-    // 5. UNDO / REDO HISTORY ENGINE
+    // 6. ONE-CLICK THEME APPLICATION
+    // =========================================================================
+    function applyThemeToWidgets(themeKey) {
+        const t = THEMES[themeKey];
+        if (!t) return;
+        saveHistoryState();
+
+        state.currentThemeKey = themeKey;
+
+        state.widgets.forEach(w => {
+            if (w.type === 'smooth-arc' || w.type === 'shift-lights' || w.type === 'rev-strip' || w.type === 'boost-gauge') {
+                w.color = t.primary;
+                w.trackColor = t.track;
+            } else if (w.type === 'digital-value') {
+                w.color = t.text;
+            } else if (w.type === 'card-box') {
+                w.bgColor = t.bgCard;
+                w.color = t.primary;
+            } else if (w.type === 'bar-slider' || w.type === 'temp-stack' || w.type === 'battery-meter') {
+                w.color = t.primary;
+                w.bgColor = t.track;
+            } else if (w.type === 'dial-needle') {
+                w.color = t.primary;
+            } else if (w.type === 'text-label') {
+                w.color = t.textMuted;
+            } else if (w.type === 'status-badge') {
+                w.color = t.primary;
+            }
+        });
+
+        renderInspector();
+        renderLayersList();
+        renderCanvas();
+    }
+
+    themeSelect?.addEventListener('change', (e) => {
+        applyThemeToWidgets(e.target.value);
+    });
+
+    // =========================================================================
+    // 7. UNDO / REDO HISTORY ENGINE
     // =========================================================================
     function saveHistoryState() {
         const snapshot = JSON.stringify(state.widgets);
@@ -226,7 +343,6 @@ document.addEventListener('DOMContentLoaded', () => {
         renderInspector();
         renderLayersList();
         renderCanvas();
-        if (window.LivePreviewBridge) window.LivePreviewBridge.sendFullLayout();
     }
 
     function performRedo() {
@@ -240,81 +356,102 @@ document.addEventListener('DOMContentLoaded', () => {
         renderInspector();
         renderLayersList();
         renderCanvas();
-        if (window.LivePreviewBridge) window.LivePreviewBridge.sendFullLayout();
+    }
+
+    // Keyboard Shortcuts
+    window.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
+        const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+        if (isCmdOrCtrl && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) performRedo();
+            else performUndo();
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === 'y') {
+            e.preventDefault();
+            performRedo();
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (state.selectedWidgetId) {
+                e.preventDefault();
+                deleteSelectedWidget();
+            }
+        } else if (isCmdOrCtrl && e.key.toLowerCase() === 'd') {
+            e.preventDefault();
+            duplicateSelectedWidget();
+        }
+    });
+
+    function deleteSelectedWidget() {
+        if (!state.selectedWidgetId) return;
+        saveHistoryState();
+        state.widgets = state.widgets.filter(w => w.id !== state.selectedWidgetId);
+        state.selectedWidgetId = null;
+
+        renderLayersList();
+        renderInspector();
+        renderCanvas();
+    }
+
+    function duplicateSelectedWidget() {
+        if (!state.selectedWidgetId) return;
+        const orig = state.widgets.find(w => w.id === state.selectedWidgetId);
+        if (!orig) return;
+
+        saveHistoryState();
+        const clone = JSON.parse(JSON.stringify(orig));
+        clone.id = `${orig.type}_${Date.now().toString().slice(-4)}`;
+        clone.name = `${orig.name || orig.type} (Copy)`;
+        clone.x += 16;
+        clone.y += 16;
+        state.widgets.push(clone);
+        state.selectedWidgetId = clone.id;
+
+        renderLayersList();
+        renderInspector();
+        renderCanvas();
     }
 
     // =========================================================================
-    // 6. EXACT 1-TO-1 REAL ESP SCREEN PRESET LAYOUTS
+    // 8. EXACT 1-TO-1 REAL ESP SCREEN PRESETS
     // =========================================================================
-
-    // PRESET 1: Honda Civic 9G 1.8L Eco Coach AMOLED (454x454)
     function loadPresetCivicAmoled() {
         const cx = 227;
         const cy = 227;
 
         state.widgets = [
-            // 1. Concentric RPM Arc (0 to 8000 RPM)
             { id: 'rpm_arc', type: 'smooth-arc', x: cx, y: cy, radius: 200, thickness: 14, startAngle: 140, endAngle: 400, color: '#00f0ff', trackColor: '#101726', min: 0, max: 8000, binding: 'rpm', name: 'RPM Arc (0-8k)' },
-
-            // 2. Concentric Throttle Position Arc (0 to 100%)
             { id: 'throttle_arc', type: 'smooth-arc', x: cx, y: cy, radius: 170, thickness: 10, startAngle: 140, endAngle: 400, color: '#00ff66', trackColor: '#101726', min: 0, max: 100, binding: 'throttle', name: 'Throttle Arc (%)' },
-
-            // 3. Efficiency Arc (0 to 20 L/100km)
-            { id: 'eff_arc', type: 'smooth-arc', x: cx, y: cy, radius: 140, thickness: 8, startAngle: 140, endAngle: 400, color: '#ffcc00', trackColor: '#101726', min: 0, max: 20, value: 7.2, name: 'Eco Coach Arc (L/100)' },
-
-            // 4. Massive Central Speedometer with 120px Segment7 Font
-            { id: 'speed_value', type: 'digital-value', x: cx, y: 184, fontSize: 96, fontFamily: 'Segment7, "DSEG7-Classic", monospace', color: '#ffffff', binding: 'speed_kmh', showGhost: true, ghostOpacity: 0.08, ghostDigits: '888', name: 'Speed Readout (Segment7)' },
+            { id: 'eff_arc', type: 'smooth-arc', x: cx, y: cy, radius: 140, thickness: 8, startAngle: 140, endAngle: 400, color: '#ffcc00', trackColor: '#101726', min: 0, max: 20, value: 7.2, name: 'Eco Coach Arc' },
+            { id: 'speed_value', type: 'digital-value', x: cx, y: 184, fontSize: 96, fontFamily: 'Segment7, "DSEG7-Classic", monospace', color: '#ffffff', binding: 'speed_kmh', showGhost: true, ghostOpacity: 0.08, ghostDigits: '888', name: 'Speed Readout' },
             { id: 'speed_label', type: 'text-label', x: cx, y: 248, text: 'km/h', fontSize: 18, fontFamily: 'Montserrat, sans-serif', color: '#00f0ff', name: 'Speed Unit' },
-
-            // 5. Digital Telemetry Stack
             { id: 'eff_val', type: 'digital-value', x: cx - 20, y: 290, fontSize: 20, fontFamily: '"DSEG7-Classic", monospace', color: '#ffcc00', value: '7.2', name: 'Eco Value' },
             { id: 'eff_label', type: 'text-label', x: cx + 24, y: 290, text: 'L/100', fontSize: 14, fontFamily: 'Montserrat, sans-serif', color: '#8a99ad', name: 'Eco Unit' },
-
             { id: 'throttle_val', type: 'digital-value', x: cx - 20, y: 320, fontSize: 20, fontFamily: '"DSEG7-Classic", monospace', color: '#00ff66', binding: 'throttle', name: 'Throttle Value' },
             { id: 'throttle_label', type: 'text-label', x: cx + 20, y: 320, text: '%', fontSize: 14, fontFamily: 'Montserrat, sans-serif', color: '#8a99ad', name: 'Throttle Unit' },
-
             { id: 'rpm_num_val', type: 'digital-value', x: cx - 20, y: 350, fontSize: 20, fontFamily: '"DSEG7-Classic", monospace', color: '#00f0ff', binding: 'rpm', name: 'RPM Value' },
             { id: 'rpm_num_label', type: 'text-label', x: cx + 26, y: 350, text: 'rpm', fontSize: 14, fontFamily: 'Montserrat, sans-serif', color: '#8a99ad', name: 'RPM Unit' },
-
-            // 6. Efficiency Monitor Footer & Gear Indicator
             { id: 'status_label', type: 'text-label', x: cx, y: 390, text: 'Efficiency Monitor', fontSize: 16, fontFamily: 'Montserrat, sans-serif', color: '#00ff66', name: 'Status Footer' },
             { id: 'gear_badge', type: 'status-badge', x: cx, y: 80, text: 'D4', fontSize: 14, color: '#00f0ff', binding: 'gear', name: 'Gear Pill' }
         ];
         saveHistoryState();
     }
 
-    // PRESET 2: Seeed XIAO GC9A01 Universal Gauge (240x240)
     function loadPresetXiaoProduction() {
         const cx = 120;
         const cy = 120;
 
         state.widgets = [
-            // 1. Shift Light Outer LED Arch (12 LEDs across top from 210° to 330°, radius 110)
             { id: 'w_shift_lights', type: 'shift-lights', x: cx, y: cy, radius: 110, ledRadius: 4, ledCount: 12, startAngle: 210, endAngle: 330, max: 7000, binding: 'rpm', name: 'Tach Shift Arch' },
-
-            // 2. Top Status & Battery Header
-            { id: 'w_link_badge', type: 'text-label', x: cx, y: 16, text: 'ESP-NOW 20Hz', fontSize: 10, fontFamily: 'Inter, sans-serif', color: '#00f0ff', binding: 'link_status', name: 'Link Badge' },
+            { id: 'w_link_badge', type: 'text-label', x: cx, y: 16, text: 'ESP-NOW 50Hz', fontSize: 10, fontFamily: 'Inter, sans-serif', color: '#00f0ff', binding: 'link_status', name: 'Link Badge' },
             { id: 'w_batt_voltage', type: 'text-label', x: cx, y: 28, text: '13.8V', fontSize: 10, fontFamily: '"JetBrains Mono", monospace', color: '#8a99ad', binding: 'battery_v', name: 'Batt Readout' },
-
-            // 3. Steering Angle Dial Header (270° top center)
             { id: 'w_steering_val', type: 'text-label', x: cx, y: 68, text: '15°L', fontSize: 12, fontFamily: 'Orbitron, monospace', color: '#8a99ad', binding: 'steering_deg', name: 'Steering Angle' },
-
-            // 4. Outer RPM Smooth Arc (135° to 405° across top, radius 98, thickness 8)
             { id: 'w_rpm_arc', type: 'smooth-arc', x: cx, y: cy, radius: 98, thickness: 8, startAngle: 135, endAngle: 405, color: '#00ff66', trackColor: '#1e2942', min: 0, max: 8000, binding: 'rpm', name: 'RPM Arc Sweep' },
-
-            // 5. Throttle Slider Arc (150° to 210° left vertical arc, radius 82, thickness 6)
             { id: 'w_throttle_arc', type: 'smooth-arc', x: cx, y: cy, radius: 82, thickness: 6, startAngle: 150, endAngle: 210, color: '#00ff66', trackColor: '#1e2942', min: 0, max: 100, binding: 'throttle', name: 'Throttle Arc' },
             { id: 'w_throttle_num', type: 'digital-value', x: cx - 68, y: cy, fontSize: 13, fontFamily: 'Orbitron, monospace', color: '#00ff66', binding: 'throttle', unit: '%', name: 'Throttle Value' },
-
-            // 6. Brake Slider Arc (30° to -30° right vertical arc, radius 82, thickness 6)
             { id: 'w_brake_arc', type: 'smooth-arc', x: cx, y: cy, radius: 82, thickness: 6, startAngle: 30, endAngle: -30, color: '#0088ff', trackColor: '#1e2942', min: 0, max: 100, binding: 'brake', name: 'Brake Arc' },
             { id: 'w_brake_num', type: 'digital-value', x: cx + 68, y: cy, fontSize: 13, fontFamily: 'Orbitron, monospace', color: '#0088ff', binding: 'brake', unit: '%', name: 'Brake Value' },
-
-            // 7. Central Speedometer Readout
             { id: 'w_speed_val', type: 'digital-value', x: cx, y: cy + 6, fontSize: 44, fontFamily: 'Orbitron, monospace', color: '#ffffff', binding: 'speed_kmh', unit: '', name: 'Central Speed' },
             { id: 'w_speed_unit', type: 'text-label', x: cx, y: cy + 30, text: 'KM/H', fontSize: 10, fontFamily: 'Rajdhani, sans-serif', color: '#8a99ad', name: 'Speed Unit' },
-
-            // 8. Bottom Badges (Coolant, Fuel, Gear)
             { id: 'w_water_temp', type: 'text-label', x: cx - 48, y: cy + 62, text: '92°C', fontSize: 11, fontFamily: 'Inter, sans-serif', color: '#ffcc00', binding: 'water_temp', name: 'Water Temp' },
             { id: 'w_fuel_level', type: 'text-label', x: cx, y: cy + 62, text: 'F:75%', fontSize: 11, fontFamily: 'Inter, sans-serif', color: '#00ff66', binding: 'fuel_pct', name: 'Fuel Level' },
             { id: 'w_gear_circle', type: 'status-badge', x: cx + 48, y: cy + 62, text: '4', color: '#00f0ff', binding: 'gear', name: 'Gear Indicator' }
@@ -322,7 +459,6 @@ document.addEventListener('DOMContentLoaded', () => {
         saveHistoryState();
     }
 
-    // PRESET 3: Seeed XIAO EEZ Studio Screen 1 (240x240)
     function loadPresetXiaoEez() {
         const cx = 120;
         const cy = 120;
@@ -339,51 +475,37 @@ document.addEventListener('DOMContentLoaded', () => {
         saveHistoryState();
     }
 
-    // PRESET 4: ESP32-S3-LCD-3.14 RaceLab Bar Chart & TPMS (800x240)
     function loadPresetRaceLab314() {
         state.widgets = [
-            // Background Cards
             { id: 'card_bars', type: 'card-box', x: 12, y: 12, w: 140, h: 216, borderRadius: 10, color: '#00f0ff', bgColor: '#0e1526', name: 'Telemetry Bar Panel' },
             { id: 'card_chart', type: 'card-box', x: 164, y: 12, w: 410, h: 216, borderRadius: 10, color: '#00ff66', bgColor: '#0e1526', name: 'Live Waveform Panel' },
             { id: 'card_tpms', type: 'card-box', x: 586, y: 12, w: 202, h: 216, borderRadius: 10, color: '#ffcc00', bgColor: '#0e1526', name: 'TPMS Chassis Panel' },
-
-            // Left 3-Bar Telemetry (Throttle, Brake, RPM)
             { id: 'bar_thr', type: 'bar-slider', x: 30, y: 40, w: 22, h: 140, min: 0, max: 100, color: '#00ff66', bgColor: '#18243c', binding: 'throttle', name: 'Throttle Bar' },
             { id: 'lbl_thr', type: 'text-label', x: 41, y: 195, text: 'THR', fontSize: 10, fontFamily: 'Rajdhani, sans-serif', color: '#00ff66', name: 'THR Label' },
-
             { id: 'bar_brk', type: 'bar-slider', x: 68, y: 40, w: 22, h: 140, min: 0, max: 100, color: '#ff3366', bgColor: '#18243c', binding: 'brake', name: 'Brake Bar' },
             { id: 'lbl_brk', type: 'text-label', x: 79, y: 195, text: 'BRK', fontSize: 10, fontFamily: 'Rajdhani, sans-serif', color: '#ff3366', name: 'BRK Label' },
-
             { id: 'bar_rpm', type: 'bar-slider', x: 106, y: 40, w: 22, h: 140, min: 0, max: 8000, color: '#00f0ff', bgColor: '#18243c', binding: 'rpm', name: 'RPM Bar' },
             { id: 'lbl_rpm', type: 'text-label', x: 117, y: 195, text: 'RPM', fontSize: 10, fontFamily: 'Rajdhani, sans-serif', color: '#00f0ff', name: 'RPM Label' },
-
-            // Center Live Telemetry History Chart
             { id: 'chart_history', type: 'history-chart', x: 180, y: 46, w: 378, h: 140, color: '#00ff66', name: 'Live CAN Waveform' },
-            { id: 'chart_title', type: 'text-label', x: 250, y: 28, text: 'CAN TELEMETRY 20Hz TRACE', fontSize: 11, fontFamily: 'Orbitron, monospace', color: '#00ff66', name: 'Chart Header' },
+            { id: 'chart_title', type: 'text-label', x: 250, y: 28, text: 'CAN TELEMETRY 50Hz TRACE', fontSize: 11, fontFamily: 'Orbitron, monospace', color: '#00ff66', name: 'Chart Header' },
             { id: 'chart_speed_val', type: 'digital-value', x: 510, y: 28, fontSize: 18, fontFamily: '"JetBrains Mono", monospace', color: '#ffffff', binding: 'speed_kmh', unit: ' km/h', name: 'Chart Speed' },
-
-            // Right TPMS 4-Tire Quadrant Map
             { id: 'tpms_chassis', type: 'tpms-map', x: 687, y: 120, w: 180, h: 170, name: '4-Wheel TPMS' },
             { id: 'tpms_header', type: 'text-label', x: 687, y: 28, text: 'TPMS & G-METER', fontSize: 11, fontFamily: 'Orbitron, monospace', color: '#ffcc00', name: 'TPMS Header' }
         ];
         saveHistoryState();
     }
 
-    // PRESET 5: Seeed XIAO Dual Round Cockpit (480x240)
     function loadPresetDualCockpit() {
         const c1x = 120;
         const c2x = 360;
         const cy = 120;
 
         state.widgets = [
-            // Left Gauge: Tachometer & Shift Lights
             { id: 'dual_shift', type: 'shift-lights', x: c1x, y: cy, radius: 105, ledRadius: 4, ledCount: 12, startAngle: 210, endAngle: 330, max: 7000, binding: 'rpm', name: 'Left Shift Arch' },
             { id: 'dual_rpm_arc', type: 'smooth-arc', x: c1x, y: cy, radius: 92, thickness: 8, startAngle: 135, endAngle: 405, color: '#00f0ff', trackColor: '#141c30', min: 0, max: 8000, binding: 'rpm', name: 'Left RPM Arc' },
             { id: 'dual_speed', type: 'digital-value', x: c1x, y: cy - 4, fontSize: 42, fontFamily: 'Orbitron, monospace', color: '#ffffff', binding: 'speed_kmh', name: 'Left Speed' },
             { id: 'dual_speed_u', type: 'text-label', x: c1x, y: cy + 22, text: 'KM/H', fontSize: 10, fontFamily: 'Rajdhani, sans-serif', color: '#8a99ad', name: 'Left Speed Unit' },
             { id: 'dual_gear', type: 'status-badge', x: c1x, y: cy + 50, text: '4', color: '#00f0ff', binding: 'gear', name: 'Left Gear' },
-
-            // Right Gauge: G-Meter & Telemetry Hub
             { id: 'dual_gforce', type: 'g-force-meter', x: c2x, y: cy, radius: 78, color: '#00ff66', name: 'Right G-Force Radar' },
             { id: 'dual_g_label', type: 'text-label', x: c2x, y: 44, text: 'LATERAL G-FORCE', fontSize: 10, fontFamily: 'Orbitron, monospace', color: '#00ff66', name: 'G-Force Label' },
             { id: 'dual_temp', type: 'text-label', x: c2x - 45, y: cy + 62, text: '92°C', fontSize: 11, fontFamily: '"JetBrains Mono", monospace', color: '#ffcc00', binding: 'water_temp', name: 'Right Temp' },
@@ -392,7 +514,6 @@ document.addEventListener('DOMContentLoaded', () => {
         saveHistoryState();
     }
 
-    // PRESET 6: Cyberpunk Neon Hypercar HUD
     function loadPresetCyberpunk() {
         const cx = state.preset.width / 2;
         const cy = state.preset.height / 2;
@@ -408,24 +529,8 @@ document.addEventListener('DOMContentLoaded', () => {
         saveHistoryState();
     }
 
-    function applyCurrentPresetLayout() {
-        if (state.currentPresetKey === 'amoled-454') {
-            loadPresetCivicAmoled();
-        } else if (state.currentPresetKey === 'xiao-round-240') {
-            loadPresetXiaoProduction();
-        } else if (state.currentPresetKey === 'xiao-dual-round') {
-            loadPresetDualCockpit();
-        } else if (state.currentPresetKey === 'esp32-s3-lcd-314') {
-            loadPresetRaceLab314();
-        } else {
-            loadPresetCivicAmoled();
-        }
-        renderLayersList();
-        renderCanvas();
-    }
-
     // =========================================================================
-    // 7. CANVAS RENDERING ENGINE
+    // 9. CANVAS RENDERING ENGINE
     // =========================================================================
     function updateBezelFrameDimensions() {
         canvas.width = state.preset.width;
@@ -449,11 +554,11 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.save();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Draw Display Canvas Background
+        // Canvas Background
         ctx.fillStyle = '#050811';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Draw Grid Snapping Lines
+        // Snapping Grid
         if (state.gridSnap) {
             ctx.strokeStyle = '#0d1526';
             ctx.lineWidth = 1;
@@ -471,14 +576,14 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // Draw All Canvas Widgets
+        // Draw Widgets
         state.widgets.forEach(w => {
             ctx.save();
             renderWidget(w);
             ctx.restore();
         });
 
-        // Draw Selection Bounding Box & Handles
+        // Draw Selection Bounding Box
         if (state.selectedWidgetId) {
             const selW = state.widgets.find(w => w.id === state.selectedWidgetId);
             if (selW) {
@@ -526,7 +631,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         ctx.shadowColor = '#ff0055';
                         ctx.shadowBlur = 12;
                     } else if (rpmPct >= threshold) {
-                        let ledColor = '#00ff66';
+                        let ledColor = w.color || '#00ff66';
                         if (i >= count * 0.75) ledColor = '#ff3366';
                         else if (i >= count * 0.45) ledColor = '#ffcc00';
                         ctx.fillStyle = ledColor;
@@ -542,12 +647,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
             }
 
+            case 'rev-strip': {
+                const count = w.ledCount || 16;
+                const rw = w.w || 220;
+                const rh = w.h || 14;
+                const rpmPct = Math.min(1.0, Math.max(0, val / (w.max || 8000)));
+                const ledW = (rw - (count - 1) * 3) / count;
+
+                for (let i = 0; i < count; i++) {
+                    const lx = w.x + i * (ledW + 3);
+                    const threshold = (i + 1) / count;
+                    ctx.beginPath();
+                    ctx.roundRect(lx, w.y, ledW, rh, 2);
+
+                    if (rpmPct >= threshold) {
+                        let c = w.color || '#00ff66';
+                        if (i >= count * 0.8) c = '#00f0ff';
+                        else if (i >= count * 0.6) c = '#ff0055';
+                        else if (i >= count * 0.35) c = '#ffcc00';
+                        ctx.fillStyle = c;
+                        ctx.shadowColor = c;
+                        ctx.shadowBlur = 6;
+                    } else {
+                        ctx.fillStyle = w.trackColor || '#141e30';
+                        ctx.shadowBlur = 0;
+                    }
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+                break;
+            }
+
             case 'smooth-arc': {
                 const min = w.min || 0;
                 const max = w.max || 100;
                 let startDeg = w.startAngle !== undefined ? w.startAngle : 135;
                 let endDeg = w.endAngle !== undefined ? w.endAngle : 405;
-
                 let startA = startDeg * Math.PI / 180;
                 let endA = endDeg * Math.PI / 180;
 
@@ -567,16 +702,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const valA = startA + normVal * totalSweep;
 
-                let activeColor = w.color || '#00ff66';
-                if (w.binding === 'rpm') {
-                    const ratio = val / (max || 8000);
-                    if (ratio > 0.85) activeColor = '#ff3366';
-                    else if (ratio > 0.65) activeColor = '#ffcc00';
-                    else if (ratio > 0.35) activeColor = '#00ff66';
-                    else activeColor = '#00f0ff';
-                }
-
-                // Draw Background Track
+                // Track
                 ctx.beginPath();
                 ctx.arc(w.x, w.y, w.radius || 100, startA, endA, counterClockwise);
                 ctx.strokeStyle = w.trackColor || '#121829';
@@ -584,18 +710,51 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.lineCap = 'round';
                 ctx.stroke();
 
-                // Draw Active Glowing Arc
+                // Active Arc
                 if (normVal > 0.001) {
                     ctx.beginPath();
                     ctx.arc(w.x, w.y, w.radius || 100, startA, valA, counterClockwise);
-                    ctx.strokeStyle = activeColor;
+                    ctx.strokeStyle = w.color || '#00ff66';
                     ctx.lineWidth = w.thickness || 12;
                     ctx.lineCap = 'round';
-                    ctx.shadowColor = activeColor;
+                    ctx.shadowColor = w.color || '#00ff66';
                     ctx.shadowBlur = 10;
                     ctx.stroke();
                     ctx.shadowBlur = 0;
                 }
+                break;
+            }
+
+            case 'boost-gauge': {
+                const minB = w.min || -1.0;
+                const maxB = w.max || 2.5;
+                const bNorm = Math.min(Math.max((val - minB) / (maxB - minB), 0), 1);
+                const bAngle = (135 + bNorm * 270) * Math.PI / 180;
+
+                // Gauge Scale Arc
+                ctx.beginPath();
+                ctx.arc(w.x, w.y, w.radius || 60, 135 * Math.PI / 180, 405 * Math.PI / 180);
+                ctx.strokeStyle = w.trackColor || '#141e30';
+                ctx.lineWidth = 8;
+                ctx.stroke();
+
+                // Active Boost Color (Cyan in Vacuum, Orange/Red in Boost)
+                const boostColor = val > 0 ? (w.color || '#ff6600') : '#00f0ff';
+                ctx.beginPath();
+                ctx.arc(w.x, w.y, w.radius || 60, 135 * Math.PI / 180, bAngle);
+                ctx.strokeStyle = boostColor;
+                ctx.lineWidth = 8;
+                ctx.shadowColor = boostColor;
+                ctx.shadowBlur = 8;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+
+                // Digital readout in center
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '700 16px Orbitron, monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`${val > 0 ? '+' : ''}${val} bar`, w.x, w.y);
                 break;
             }
 
@@ -607,24 +766,140 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const displayStr = `${val}${w.unit || ''}`;
 
-                // Draw Inactive Ghost Segments (faint 888) if enabled
                 if (w.showGhost) {
                     ctx.save();
                     ctx.fillStyle = w.color || '#00f0ff';
                     ctx.globalAlpha = w.ghostOpacity !== undefined ? w.ghostOpacity : 0.08;
-                    const ghostText = w.ghostDigits || '888';
-                    ctx.fillText(ghostText, w.x, w.y);
+                    ctx.fillText(w.ghostDigits || '888', w.x, w.y);
                     ctx.restore();
                 }
 
-                // Draw Active Telemetry Number
                 ctx.fillStyle = w.color || '#ffffff';
-                if (w.glow) {
-                    ctx.shadowColor = w.color || '#00f0ff';
-                    ctx.shadowBlur = 10;
-                }
+                ctx.shadowColor = w.color || '#00f0ff';
+                ctx.shadowBlur = w.glow ? 10 : 0;
                 ctx.fillText(displayStr, w.x, w.y);
                 ctx.shadowBlur = 0;
+                break;
+            }
+
+            case 'lap-timer': {
+                ctx.fillStyle = '#0f172a';
+                ctx.strokeStyle = w.color || '#00ff66';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(w.x, w.y, w.w || 200, w.h || 60, 8);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '600 10px Rajdhani, sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText('LAP TIME', w.x + 10, w.y + 16);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '700 18px "JetBrains Mono", monospace';
+                ctx.fillText(state.telemetry.lap_current, w.x + 10, w.y + 40);
+
+                ctx.fillStyle = state.telemetry.lap_delta.startsWith('-') ? '#00ff66' : '#ff3366';
+                ctx.font = '700 14px "JetBrains Mono", monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(`Δ ${state.telemetry.lap_delta}`, w.x + (w.w || 200) - 10, w.y + 40);
+                break;
+            }
+
+            case 'temp-stack': {
+                const tw = w.w || 90;
+                const th = w.h || 120;
+
+                // Oil Temp Bar
+                const oilNorm = Math.min(Math.max((state.telemetry.oil_temp - 40) / 110, 0), 1);
+                ctx.fillStyle = w.bgColor || '#141e30';
+                ctx.fillRect(w.x, w.y, 16, th);
+                ctx.fillStyle = '#ff6600';
+                ctx.fillRect(w.x, w.y + th * (1 - oilNorm), 16, th * oilNorm);
+
+                // Water Temp Bar
+                const waterNorm = Math.min(Math.max((state.telemetry.water_temp - 40) / 90, 0), 1);
+                ctx.fillStyle = w.bgColor || '#141e30';
+                ctx.fillRect(w.x + 24, w.y, 16, th);
+                ctx.fillStyle = '#00f0ff';
+                ctx.fillRect(w.x + 24, w.y + th * (1 - waterNorm), 16, th * waterNorm);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '600 10px Rajdhani, sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(`OIL: ${state.telemetry.oil_temp}°C`, w.x + 48, w.y + 30);
+                ctx.fillText(`H2O: ${state.telemetry.water_temp}°C`, w.x + 48, w.y + 60);
+                break;
+            }
+
+            case 'battery-meter': {
+                const bw = w.w || 120;
+                const bh = w.h || 40;
+                ctx.fillStyle = w.bgColor || '#0e1526';
+                ctx.strokeStyle = w.color || '#00f0ff';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(w.x, w.y, bw, bh, 6);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#00f0ff';
+                ctx.font = '700 16px "JetBrains Mono", monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`🔋 ${state.telemetry.battery_v}V`, w.x + bw / 2, w.y + bh / 2);
+                break;
+            }
+
+            case 'compass-dial': {
+                const cr = w.radius || 40;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                ctx.beginPath();
+                ctx.arc(0, 0, cr, 0, Math.PI * 2);
+                ctx.strokeStyle = w.color || '#00f0ff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '700 12px Rajdhani, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('N', 0, -cr + 12);
+                ctx.fillText('S', 0, cr - 12);
+                ctx.fillText('W', -cr + 12, 0);
+                ctx.fillText('E', cr - 12, 0);
+
+                // Heading arrow
+                ctx.rotate((state.telemetry.heading_deg || 0) * Math.PI / 180);
+                ctx.beginPath();
+                ctx.moveTo(0, -cr + 16);
+                ctx.lineTo(6, 0);
+                ctx.lineTo(-6, 0);
+                ctx.fillStyle = '#ff0055';
+                ctx.fill();
+                ctx.restore();
+                break;
+            }
+
+            case 'speed-sign': {
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                ctx.beginPath();
+                ctx.arc(0, 0, 22, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.strokeStyle = '#ff0033';
+                ctx.lineWidth = 5;
+                ctx.stroke();
+
+                ctx.fillStyle = '#000000';
+                ctx.font = '800 16px "Inter", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(w.text || '90', 0, 0);
+                ctx.restore();
                 break;
             }
 
@@ -659,7 +934,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.translate(w.x, w.y);
                 ctx.rotate(nAngle);
 
-                // Needle Blade
                 ctx.beginPath();
                 ctx.moveTo(-10, 0);
                 ctx.lineTo(w.radius || 70, 0);
@@ -670,7 +944,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.shadowBlur = 8;
                 ctx.stroke();
 
-                // Center Pivot Hub
                 ctx.beginPath();
                 ctx.arc(0, 0, 8, 0, Math.PI * 2);
                 ctx.fillStyle = '#0f172a';
@@ -714,32 +987,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 const bMax = w.max || 100;
                 const bNorm = Math.min(Math.max((val - bMin) / (bMax - bMin), 0), 1);
 
-                // Background Track
                 ctx.fillStyle = w.bgColor || '#141c30';
                 ctx.beginPath();
                 ctx.roundRect(w.x, w.y, barW, barH, w.borderRadius || 4);
                 ctx.fill();
 
-                // Filled Bar
                 if (barH > barW) {
-                    // Vertical Bar (Bottom to Top)
                     const fillH = barH * bNorm;
                     ctx.fillStyle = w.color || '#00ff66';
-                    ctx.shadowColor = w.color || '#00ff66';
-                    ctx.shadowBlur = 6;
                     ctx.beginPath();
                     ctx.roundRect(w.x, w.y + (barH - fillH), barW, fillH, w.borderRadius || 4);
                     ctx.fill();
-                    ctx.shadowBlur = 0;
                 } else {
-                    // Horizontal Bar
                     ctx.fillStyle = w.color || '#00f0ff';
-                    ctx.shadowColor = w.color || '#00f0ff';
-                    ctx.shadowBlur = 6;
                     ctx.beginPath();
                     ctx.roundRect(w.x, w.y, barW * bNorm, barH, w.borderRadius || 4);
                     ctx.fill();
-                    ctx.shadowBlur = 0;
                 }
                 break;
             }
@@ -748,22 +1011,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const cw = w.w || 380;
                 const ch = w.h || 140;
 
-                // Background container
                 ctx.fillStyle = '#080d1a';
                 ctx.fillRect(w.x, w.y, cw, ch);
                 ctx.strokeStyle = '#18243c';
                 ctx.lineWidth = 1;
                 ctx.strokeRect(w.x, w.y, cw, ch);
 
-                // Horizontal grid lines
-                for (let y = w.y + 25; y < w.y + ch; y += 25) {
-                    ctx.beginPath();
-                    ctx.moveTo(w.x, y);
-                    ctx.lineTo(w.x + cw, y);
-                    ctx.stroke();
-                }
-
-                // Plot RPM wave
                 ctx.beginPath();
                 const pts = state.chartHistory.rpm;
                 for (let i = 0; i < pts.length; i++) {
@@ -774,10 +1027,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 ctx.strokeStyle = w.color || '#00ff66';
                 ctx.lineWidth = 2;
-                ctx.shadowColor = w.color || '#00ff66';
-                ctx.shadowBlur = 6;
                 ctx.stroke();
-                ctx.shadowBlur = 0;
                 break;
             }
 
@@ -786,7 +1036,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.save();
                 ctx.translate(w.x, w.y);
 
-                // Concentric circles (0.5G, 1.0G, 1.5G)
                 [0.33, 0.66, 1.0].forEach((rFactor, idx) => {
                     ctx.beginPath();
                     ctx.arc(0, 0, gRadius * rFactor, 0, Math.PI * 2);
@@ -795,7 +1044,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     ctx.stroke();
                 });
 
-                // Crosshairs
                 ctx.beginPath();
                 ctx.moveTo(-gRadius, 0);
                 ctx.lineTo(gRadius, 0);
@@ -804,7 +1052,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.strokeStyle = '#1e2942';
                 ctx.stroke();
 
-                // Live G point
                 const gx = (state.telemetry.lat_g / 1.5) * gRadius;
                 const gy = -(state.telemetry.long_g / 1.5) * gRadius;
 
@@ -819,22 +1066,17 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             case 'tpms-map': {
-                const mw = w.w || 180;
-                const mh = w.h || 170;
                 ctx.save();
                 ctx.translate(w.x, w.y);
-
-                // Car Chassis Wireframe
                 ctx.strokeStyle = '#273654';
                 ctx.lineWidth = 2;
                 ctx.strokeRect(-24, -40, 48, 80);
 
-                // 4 Tires & Pressures
                 const tires = [
-                    { x: -50, y: -30, label: `${state.telemetry.tpms_fl} bar`, color: '#00ff66' },
-                    { x: 50, y: -30, label: `${state.telemetry.tpms_fr} bar`, color: '#00ff66' },
-                    { x: -50, y: 30, label: `${state.telemetry.tpms_rl} bar`, color: '#00ff66' },
-                    { x: 50, y: 30, label: `${state.telemetry.tpms_rr} bar`, color: '#00ff66' }
+                    { x: -50, y: -30, label: `${state.telemetry.tpms_fl}b`, color: '#00ff66' },
+                    { x: 50, y: -30, label: `${state.telemetry.tpms_fr}b`, color: '#00ff66' },
+                    { x: -50, y: 30, label: `${state.telemetry.tpms_rl}b`, color: '#00ff66' },
+                    { x: 50, y: 30, label: `${state.telemetry.tpms_rr}b`, color: '#00ff66' }
                 ];
 
                 tires.forEach(t => {
@@ -850,33 +1092,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     ctx.textBaseline = 'middle';
                     ctx.fillText(t.label, t.x, t.y);
                 });
-
-                ctx.restore();
-                break;
-            }
-
-            case 'annunciator-icon': {
-                ctx.save();
-                ctx.translate(w.x, w.y);
-                ctx.beginPath();
-                ctx.arc(0, 0, 16, 0, Math.PI * 2);
-                ctx.fillStyle = '#141c30';
-                ctx.fill();
-                ctx.strokeStyle = w.color || '#ffcc00';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-
-                ctx.fillStyle = w.color || '#ffcc00';
-                ctx.font = '700 14px Inter, sans-serif';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText('⚠️', 0, 0);
                 ctx.restore();
                 break;
             }
 
             case 'status-badge': {
-                ctx.fillStyle = w.color || '#0088ff';
                 let txt = w.text || 'STATUS';
                 if (w.binding === 'gear') {
                     const gears = ['P', 'R', 'N', 'D', 'S', '1', '2', '3', '4', '5', '6'];
@@ -889,10 +1109,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.fill();
                 ctx.strokeStyle = w.color || '#00f0ff';
                 ctx.lineWidth = 2;
-                ctx.shadowColor = w.color || '#00f0ff';
-                ctx.shadowBlur = 8;
                 ctx.stroke();
-                ctx.shadowBlur = 0;
 
                 ctx.fillStyle = '#ffffff';
                 ctx.font = '700 14px Orbitron, monospace';
@@ -915,7 +1132,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // DRAW SELECTION HIGHLIGHT
     function drawSelectionHighlight(w) {
         let bx = w.x - 20, by = w.y - 20, bw = 40, bh = 40;
 
@@ -937,7 +1153,6 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.setLineDash([4, 4]);
         ctx.strokeRect(bx - 4, by - 4, bw + 8, bh + 8);
 
-        // Corner Handles
         ctx.setLineDash([]);
         ctx.fillStyle = '#00f0ff';
         const corners = [
@@ -954,7 +1169,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 8. INSPECTOR PANEL RENDERER
+    // 10. INSPECTOR PANEL (WITH PROMINENT DELETE BUTTON)
     // =========================================================================
     function renderInspector() {
         if (!state.selectedWidgetId) {
@@ -987,8 +1202,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     <option value="gear" ${w.binding === 'gear' ? 'selected' : ''}>Transmission Gear</option>
                     <option value="throttle" ${w.binding === 'throttle' ? 'selected' : ''}>Throttle Position (%)</option>
                     <option value="brake" ${w.binding === 'brake' ? 'selected' : ''}>Brake Pressure (%)</option>
+                    <option value="boost_bar" ${w.binding === 'boost_bar' ? 'selected' : ''}>Turbo Boost (bar)</option>
                     <option value="fuel_pct" ${w.binding === 'fuel_pct' ? 'selected' : ''}>Fuel Level (%)</option>
                     <option value="water_temp" ${w.binding === 'water_temp' ? 'selected' : ''}>Coolant Temp (°C)</option>
+                    <option value="oil_temp" ${w.binding === 'oil_temp' ? 'selected' : ''}>Engine Oil Temp (°C)</option>
                     <option value="battery_v" ${w.binding === 'battery_v' ? 'selected' : ''}>Battery Voltage (V)</option>
                     <option value="steering_deg" ${w.binding === 'steering_deg' ? 'selected' : ''}>Steering Angle (°)</option>
                     <option value="lat_g" ${w.binding === 'lat_g' ? 'selected' : ''}>Lateral G-Force (g)</option>
@@ -1048,8 +1265,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         html += `</div>`;
 
-        // SECTION 3: Typography (for digital-value and text-label)
-        if (w.type === 'digital-value' || w.type === 'text-label') {
+        // SECTION 3: Typography
+        if (w.type === 'digital-value' || w.type === 'text-label' || w.type === 'speed-sign') {
             const allFonts = [...FONT_FAMILIES, ...state.loadedCustomFonts];
             html += `
             <div class="prop-section">
@@ -1131,6 +1348,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         html += `</div>`;
 
+        // SECTION 5: PROMINENT DELETE BUTTON
+        html += `
+        <button id="inspectorDeleteBtn" class="btn-delete-widget">
+            🗑️ Delete Selected Widget [Del]
+        </button>`;
+
         inspectorContent.innerHTML = html;
         attachInspectorEventListeners(w);
     }
@@ -1173,32 +1396,78 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderCanvas();
             });
         }
+
+        document.getElementById('inspectorDeleteBtn')?.addEventListener('click', () => {
+            deleteSelectedWidget();
+        });
     }
 
     // =========================================================================
-    // 9. LAYERS PANEL RENDERER
+    // 11. LAYERS PANEL (WITH DIRECT DELETE & DUPLICATE BUTTONS)
     // =========================================================================
     function renderLayersList() {
         layersList.innerHTML = '';
-        state.widgets.forEach(w => {
+        state.widgets.forEach((w, idx) => {
             const div = document.createElement('div');
             div.className = `layer-item ${w.id === state.selectedWidgetId ? 'active' : ''}`;
             div.innerHTML = `
                 <span class="layer-item-title">${w.name || w.id}</span>
-                <span style="font-size: 9px; color: var(--text-muted);">${w.type}</span>
+                <div class="layer-btn-group">
+                    <button class="layer-icon-btn duplicate-layer" title="Duplicate Layer">⧉</button>
+                    <button class="layer-icon-btn delete-layer" title="Delete Layer">🗑️</button>
+                </div>
             `;
-            div.addEventListener('click', () => {
+            
+            div.addEventListener('click', (e) => {
+                if (e.target.classList.contains('layer-icon-btn')) return;
                 state.selectedWidgetId = w.id;
                 renderInspector();
                 renderLayersList();
                 renderCanvas();
             });
+
+            div.querySelector('.duplicate-layer')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                saveHistoryState();
+                const clone = JSON.parse(JSON.stringify(w));
+                clone.id = `${w.type}_${Date.now().toString().slice(-4)}`;
+                clone.name = `${w.name || w.type} (Copy)`;
+                clone.x += 16;
+                clone.y += 16;
+                state.widgets.splice(idx + 1, 0, clone);
+                state.selectedWidgetId = clone.id;
+                renderLayersList();
+                renderInspector();
+                renderCanvas();
+            });
+
+            div.querySelector('.delete-layer')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                saveHistoryState();
+                state.widgets = state.widgets.filter(item => item.id !== w.id);
+                if (state.selectedWidgetId === w.id) state.selectedWidgetId = null;
+                renderLayersList();
+                renderInspector();
+                renderCanvas();
+            });
+
             layersList.appendChild(div);
         });
     }
 
+    document.getElementById('clearLayersBtn')?.addEventListener('click', () => {
+        if (confirm('Clear all widgets from canvas?')) {
+            saveHistoryState();
+            state.widgets = [];
+            state.selectedWidgetId = null;
+            renderLayersList();
+            renderInspector();
+            renderCanvas();
+        }
+    });
+
     // =========================================================================
-    // 10. ALIGNMENT & CANVAS INTERACTION TOOLS
+    // 12. ALIGNMENT & CANVAS INTERACTION TOOLS
     // =========================================================================
     function alignSelected(direction) {
         if (!state.selectedWidgetId) return;
@@ -1240,36 +1509,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('alignTopBtn')?.addEventListener('click', () => alignSelected('top'));
     document.getElementById('alignCenterVBtn')?.addEventListener('click', () => alignSelected('centerV'));
     document.getElementById('alignBottomBtn')?.addEventListener('click', () => alignSelected('bottom'));
-
-    document.getElementById('duplicateWidgetBtn')?.addEventListener('click', () => {
-        if (!state.selectedWidgetId) return;
-        const orig = state.widgets.find(w => w.id === state.selectedWidgetId);
-        if (!orig) return;
-
-        saveHistoryState();
-        const clone = JSON.parse(JSON.stringify(orig));
-        clone.id = `${orig.type}_${Date.now().toString().slice(-4)}`;
-        clone.name = `${orig.name || orig.type} (Copy)`;
-        clone.x += 16;
-        clone.y += 16;
-        state.widgets.push(clone);
-        state.selectedWidgetId = clone.id;
-
-        renderLayersList();
-        renderInspector();
-        renderCanvas();
-    });
-
-    document.getElementById('deleteWidgetBtn')?.addEventListener('click', () => {
-        if (!state.selectedWidgetId) return;
-        saveHistoryState();
-        state.widgets = state.widgets.filter(w => w.id !== state.selectedWidgetId);
-        state.selectedWidgetId = null;
-
-        renderLayersList();
-        renderInspector();
-        renderCanvas();
-    });
+    document.getElementById('duplicateWidgetBtn')?.addEventListener('click', duplicateSelectedWidget);
+    document.getElementById('deleteWidgetBtn')?.addEventListener('click', deleteSelectedWidget);
 
     // Layer Reordering
     document.getElementById('layerUpBtn')?.addEventListener('click', () => {
@@ -1297,7 +1538,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // =========================================================================
-    // 11. CANVAS MOUSE & DRAG INTERACTION
+    // 13. CANVAS MOUSE & DRAG INTERACTION
     // =========================================================================
     canvas.addEventListener('mousedown', (e) => {
         const rect = canvas.getBoundingClientRect();
@@ -1382,9 +1623,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // =========================================================================
-    // 12. DRAG AND DROP PALETTE TO CANVAS
-    // =========================================================================
+    // Palette Drag & Drop
     document.querySelectorAll('.widget-item').forEach(item => {
         item.addEventListener('dragstart', (e) => {
             e.dataTransfer.setData('text/plain', item.getAttribute('data-type'));
@@ -1421,40 +1660,56 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function createDefaultWidget(type, x, y) {
         const id = `${type}_${Date.now().toString().slice(-4)}`;
+        const t = THEMES[state.currentThemeKey] || THEMES['civic-eco'];
+
         switch (type) {
             case 'shift-lights':
-                return { id, type, name: 'Shift Light Arch', x, y, radius: 90, ledRadius: 4, ledCount: 12, startAngle: 210, endAngle: 330, max: 7000, binding: 'rpm' };
+                return { id, type, name: 'Shift Light Arch', x, y, radius: 90, ledRadius: 4, ledCount: 12, startAngle: 210, endAngle: 330, max: 7000, color: t.primary, trackColor: t.track, binding: 'rpm' };
+            case 'rev-strip':
+                return { id, type, name: 'F1 Rev Strip', x, y, w: 220, h: 14, ledCount: 16, max: 8000, color: t.primary, trackColor: t.track, binding: 'rpm' };
             case 'smooth-arc':
-                return { id, type, name: 'Smooth Arc', x, y, radius: 80, thickness: 10, startAngle: 135, endAngle: 405, color: '#00ff66', trackColor: '#141c30', min: 0, max: 100, binding: 'throttle' };
+                return { id, type, name: 'Smooth Arc', x, y, radius: 80, thickness: 10, startAngle: 135, endAngle: 405, color: t.primary, trackColor: t.track, min: 0, max: 100, binding: 'throttle' };
+            case 'boost-gauge':
+                return { id, type, name: 'Turbo Boost Gauge', x, y, radius: 60, min: -1.0, max: 2.5, color: '#ff6600', trackColor: t.track, binding: 'boost_bar', value: 1.2 };
             case 'digital-value':
-                return { id, type, name: 'Digital Speed', x, y, fontSize: 48, fontFamily: 'Segment7, "DSEG7-Classic", monospace', color: '#ffffff', binding: 'speed_kmh', showGhost: true, ghostOpacity: 0.08, ghostDigits: '888', unit: ' km/h' };
+                return { id, type, name: 'Digital Speed', x, y, fontSize: 48, fontFamily: 'Segment7, "DSEG7-Classic", monospace', color: t.text, binding: 'speed_kmh', showGhost: true, ghostOpacity: 0.08, ghostDigits: '888', unit: ' km/h' };
+            case 'lap-timer':
+                return { id, type, name: 'Lap Timer', x, y, w: 200, h: 60, color: t.primary };
+            case 'temp-stack':
+                return { id, type, name: 'Dual Temp Stack', x, y, w: 90, h: 120, bgColor: t.track };
+            case 'battery-meter':
+                return { id, type, name: 'Battery Meter', x, y, w: 120, h: 40, color: t.secondary, bgColor: t.bgCard, binding: 'battery_v' };
+            case 'compass-dial':
+                return { id, type, name: 'Heading Compass', x, y, radius: 40, color: t.secondary };
+            case 'speed-sign':
+                return { id, type, name: 'Speed Limit Sign', x, y, text: '90' };
             case 'dial-needle':
                 return { id, type, name: 'Gauge Needle', x, y, radius: 70, startAngle: 135, endAngle: 405, color: '#ff3366', min: 0, max: 100, binding: 'throttle' };
             case 'gauge-ticks':
                 return { id, type, name: 'Dial Ticks', x, y, radius: 85, tickLen: 8, tickCount: 9, startAngle: 135, endAngle: 405, color: '#64748b' };
             case 'bar-slider':
-                return { id, type, name: 'Bar Meter', x, y, w: 140, h: 16, borderRadius: 4, color: '#00f0ff', bgColor: '#141c30', min: 0, max: 100, binding: 'throttle' };
+                return { id, type, name: 'Bar Meter', x, y, w: 140, h: 16, borderRadius: 4, color: t.primary, bgColor: t.track, min: 0, max: 100, binding: 'throttle' };
             case 'history-chart':
-                return { id, type, name: 'CAN Waveform', x, y, w: 280, h: 120, color: '#00ff66' };
+                return { id, type, name: 'CAN Waveform', x, y, w: 280, h: 120, color: t.primary };
             case 'g-force-meter':
-                return { id, type, name: 'G-Force Radar', x, y, radius: 60, color: '#00ff66' };
+                return { id, type, name: 'G-Force Radar', x, y, radius: 60, color: t.primary };
             case 'tpms-map':
                 return { id, type, name: 'TPMS 4-Tire', x, y, w: 180, h: 160 };
             case 'annunciator-icon':
                 return { id, type, name: 'Warning Lamp', x, y, color: '#ffcc00' };
             case 'status-badge':
-                return { id, type, name: 'Gear Pill', x, y, text: '4', color: '#00f0ff', binding: 'gear' };
+                return { id, type, name: 'Gear Pill', x, y, text: '4', color: t.secondary, binding: 'gear' };
             case 'text-label':
-                return { id, type, name: 'Text Label', x, y, text: 'TELEMETRY', fontSize: 14, fontFamily: 'Rajdhani, sans-serif', color: '#8a99ad' };
+                return { id, type, name: 'Text Label', x, y, text: 'TELEMETRY', fontSize: 14, fontFamily: 'Rajdhani, sans-serif', color: t.textMuted };
             case 'card-box':
-                return { id, type, name: 'Glass Card', x, y, w: 140, h: 90, borderRadius: 10, color: '#00f0ff', bgColor: '#0e1526' };
+                return { id, type, name: 'Glass Card', x, y, w: 140, h: 90, borderRadius: 10, color: t.primary, bgColor: t.bgCard };
             default:
                 return { id, type, name: type, x, y };
         }
     }
 
     // =========================================================================
-    // 13. TELEMETRY SIMULATOR CONTROLS & PHYSICS SWEEP
+    // 14. 50HZ TELEMETRY SIMULATOR
     // =========================================================================
     const simBindings = [
         { id: 'simRpm', valId: 'valRpm', key: 'rpm' },
@@ -1462,8 +1717,10 @@ document.addEventListener('DOMContentLoaded', () => {
         { id: 'simGear', valId: 'valGear', key: 'gear' },
         { id: 'simThrottle', valId: 'valThrottle', key: 'throttle' },
         { id: 'simBrake', valId: 'valBrake', key: 'brake' },
+        { id: 'simBoost', valId: 'valBoost', key: 'boost_bar', parser: v => (v / 10).toFixed(1) },
         { id: 'simFuel', valId: 'valFuel', key: 'fuel_pct' },
         { id: 'simWater', valId: 'valWater', key: 'water_temp' },
+        { id: 'simOil', valId: 'valOil', key: 'oil_temp' },
         { id: 'simBatt', valId: 'valBatt', key: 'battery_v', parser: v => (v / 10).toFixed(1) },
         { id: 'simLatG', valId: 'valLatG', key: 'lat_g', parser: v => (v / 100).toFixed(2) }
     ];
@@ -1482,7 +1739,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Sweep Test (Simulation Engine)
     const sweepBtn = document.getElementById('simPlayPauseBtn');
     if (sweepBtn) {
         sweepBtn.addEventListener('click', () => {
@@ -1491,7 +1747,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 sweepBtn.textContent = '⏸ Pause Sweep';
                 sweepBtn.classList.remove('btn-accent');
                 sweepBtn.classList.add('btn-secondary');
-                document.getElementById('simModeBadge').textContent = 'SWEEP ACTIVE';
+                document.getElementById('simModeBadge').textContent = 'SWEEP (50Hz)';
                 document.getElementById('simModeBadge').style.color = '#00ff66';
 
                 state.simSweepTimer = setInterval(() => {
@@ -1502,30 +1758,34 @@ document.addEventListener('DOMContentLoaded', () => {
                     state.telemetry.speed_kmh = Math.round(95 + Math.sin(phase * 0.7) * 45);
                     state.telemetry.throttle = Math.round(50 + Math.sin(phase * 1.2) * 45);
                     state.telemetry.brake = Math.round(Math.max(0, -Math.sin(phase * 1.2) * 80));
+                    state.telemetry.boost_bar = parseFloat((Math.sin(phase * 1.2) * 1.4).toFixed(1));
                     state.telemetry.water_temp = Math.round(92 + Math.sin(phase * 0.1) * 6);
+                    state.telemetry.oil_temp = Math.round(98 + Math.sin(phase * 0.1) * 8);
                     state.telemetry.lat_g = parseFloat((Math.sin(phase * 0.9) * 1.1).toFixed(2));
+                    state.telemetry.heading_deg = (state.telemetry.heading_deg + 1) % 360;
                     state.telemetry.gear = 1 + (Math.floor(phase * 0.6) % 6);
 
-                    // Update UI labels
+                    // Update UI Labels
                     document.getElementById('valRpm').textContent = state.telemetry.rpm;
                     document.getElementById('valSpeed').textContent = state.telemetry.speed_kmh;
                     document.getElementById('valGear').textContent = state.telemetry.gear;
                     document.getElementById('valThrottle').textContent = state.telemetry.throttle;
                     document.getElementById('valBrake').textContent = state.telemetry.brake;
+                    document.getElementById('valBoost').textContent = state.telemetry.boost_bar;
                     document.getElementById('valWater').textContent = state.telemetry.water_temp;
+                    document.getElementById('valOil').textContent = state.telemetry.oil_temp;
                     document.getElementById('valLatG').textContent = state.telemetry.lat_g;
 
-                    // Update Waveform
                     state.chartHistory.rpm.shift();
                     state.chartHistory.rpm.push(state.telemetry.rpm);
 
                     renderCanvas();
-                }, 50);
+                }, 20); // 50 FPS
             } else {
                 sweepBtn.textContent = '▶ Sweep Test';
                 sweepBtn.classList.add('btn-accent');
                 sweepBtn.classList.remove('btn-secondary');
-                document.getElementById('simModeBadge').textContent = 'MANUAL';
+                document.getElementById('simModeBadge').textContent = 'MANUAL (50Hz)';
                 document.getElementById('simModeBadge').style.color = '#ffcc00';
                 clearInterval(state.simSweepTimer);
             }
@@ -1533,7 +1793,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 14. PRESETS DROPDOWN & TARGET DISPLAY SELECTOR
+    // 15. PRESETS & DROPDOWNS
     // =========================================================================
     if (presetSelect) {
         presetSelect.addEventListener('change', (e) => {
@@ -1542,7 +1802,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.currentPresetKey = key;
                 state.preset = DEVICE_PRESETS[key];
                 updateBezelFrameDimensions();
-                applyCurrentPresetLayout();
+                if (key === 'amoled-454') loadPresetCivicAmoled();
+                else if (key === 'xiao-round-240') loadPresetXiaoProduction();
+                else if (key === 'xiao-dual-round') loadPresetDualCockpit();
+                else if (key === 'esp32-s3-lcd-314') loadPresetRaceLab314();
+                renderLayersList();
+                renderCanvas();
             }
         });
     }
@@ -1602,69 +1867,61 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Grid & Bezel Toggles
-    const gridBtn = document.getElementById('gridToggleBtn');
-    if (gridBtn) {
-        gridBtn.addEventListener('click', () => {
-            state.gridSnap = !state.gridSnap;
-            gridBtn.textContent = state.gridSnap ? 'Grid: 8px' : 'Grid: OFF';
-            gridBtn.classList.toggle('active', state.gridSnap);
-            renderCanvas();
-        });
-    }
+    // Grid & Bezel
+    document.getElementById('gridToggleBtn')?.addEventListener('click', (e) => {
+        state.gridSnap = !state.gridSnap;
+        e.target.textContent = state.gridSnap ? 'Grid: 8px' : 'Grid: OFF';
+        e.target.classList.toggle('active', state.gridSnap);
+        renderCanvas();
+    });
 
-    const bezelBtn = document.getElementById('bezelToggleBtn');
-    if (bezelBtn) {
-        bezelBtn.addEventListener('click', () => {
-            state.showBezel = !state.showBezel;
-            bezelBtn.textContent = state.showBezel ? 'Bezel: ON' : 'Bezel: OFF';
-            bezelBtn.classList.toggle('active', state.showBezel);
-            updateBezelFrameDimensions();
-        });
-    }
+    document.getElementById('bezelToggleBtn')?.addEventListener('click', (e) => {
+        state.showBezel = !state.showBezel;
+        e.target.textContent = state.showBezel ? 'Bezel: ON' : 'Bezel: OFF';
+        e.target.classList.toggle('active', state.showBezel);
+        updateBezelFrameDimensions();
+    });
 
     // =========================================================================
-    // 15. CODE EXPORT MODAL (TFT_eSPI / LVGL / JSON)
+    // 16. MODAL CODE EXPORT (LVGL 8.4 / TFT_eSPI / JSON)
     // =========================================================================
     const exportBtn = document.getElementById('exportCodeBtn');
-    const tabCppBtn = document.getElementById('tabCppBtn');
     const tabLvglBtn = document.getElementById('tabLvglBtn');
+    const tabCppBtn = document.getElementById('tabCppBtn');
     const tabJsonBtn = document.getElementById('tabJsonBtn');
     const snippetDesc = document.getElementById('modalSnippetDesc');
 
     function updateModalSnippet() {
         if (!window.CodeGenerator) return;
-        if (state.activeExportTab === 'cpp') {
-            snippetDesc.textContent = 'Production double-buffered C++ TFT_eSPI rendering loop for your ESP32 node:';
-            codeSnippet.textContent = window.CodeGenerator.generateCpp(state.preset, state.widgets);
-        } else if (state.activeExportTab === 'lvgl') {
-            snippetDesc.textContent = 'Native LVGL 8.3 C object & widget definitions matching screens.c / ui.c:';
+        if (state.activeExportTab === 'lvgl') {
+            snippetDesc.textContent = 'High-performance zero-allocation LVGL 8.4 C code optimized for 50Hz smooth updates without screen tearing:';
             codeSnippet.textContent = window.CodeGenerator.generateLvglC(state.preset, state.widgets);
+        } else if (state.activeExportTab === 'cpp') {
+            snippetDesc.textContent = 'Double-buffered C++ TFT_eSPI rendering loop for your ESP32 display node:';
+            codeSnippet.textContent = window.CodeGenerator.generateCpp(state.preset, state.widgets);
         } else {
             snippetDesc.textContent = 'Complete JSON Schema layout representation for espDash UI Studio:';
             codeSnippet.textContent = window.CodeGenerator.generateJson(state.preset, state.widgets);
         }
     }
 
-    if (exportBtn) {
-        exportBtn.addEventListener('click', () => {
-            updateModalSnippet();
-            codeModal.classList.add('active');
-        });
-    }
-
-    tabCppBtn?.addEventListener('click', () => {
-        state.activeExportTab = 'cpp';
-        tabCppBtn.classList.add('active');
-        tabLvglBtn?.classList.remove('active');
-        tabJsonBtn?.classList.remove('active');
+    exportBtn?.addEventListener('click', () => {
         updateModalSnippet();
+        codeModal.classList.add('active');
     });
 
     tabLvglBtn?.addEventListener('click', () => {
         state.activeExportTab = 'lvgl';
         tabLvglBtn.classList.add('active');
         tabCppBtn?.classList.remove('active');
+        tabJsonBtn?.classList.remove('active');
+        updateModalSnippet();
+    });
+
+    tabCppBtn?.addEventListener('click', () => {
+        state.activeExportTab = 'cpp';
+        tabCppBtn.classList.add('active');
+        tabLvglBtn?.classList.remove('active');
         tabJsonBtn?.classList.remove('active');
         updateModalSnippet();
     });
@@ -1701,40 +1958,36 @@ document.addEventListener('DOMContentLoaded', () => {
         URL.revokeObjectURL(url);
     });
 
-    document.getElementById('importJsonBtn')?.addEventListener('click', () => {
-        fileInput.click();
+    document.getElementById('importJsonBtn')?.addEventListener('click', () => fileInput.click());
+
+    fileInput?.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files[0]) {
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                try {
+                    const parsed = JSON.parse(evt.target.result);
+                    if (parsed.widgets) {
+                        saveHistoryState();
+                        state.widgets = parsed.widgets;
+                        if (parsed.preset) {
+                            state.preset = parsed.preset;
+                            updateBezelFrameDimensions();
+                        }
+                        renderLayersList();
+                        renderInspector();
+                        renderCanvas();
+                        alert('Layout imported successfully!');
+                    }
+                } catch (err) {
+                    alert(`Failed to load layout JSON: ${err.message}`);
+                }
+            };
+            reader.readAsText(e.target.files[0]);
+        }
     });
 
-    if (fileInput) {
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files[0]) {
-                const reader = new FileReader();
-                reader.onload = (evt) => {
-                    try {
-                        const parsed = JSON.parse(evt.target.result);
-                        if (parsed.widgets) {
-                            saveHistoryState();
-                            state.widgets = parsed.widgets;
-                            if (parsed.preset) {
-                                state.preset = parsed.preset;
-                                updateBezelFrameDimensions();
-                            }
-                            renderLayersList();
-                            renderInspector();
-                            renderCanvas();
-                            alert('Layout imported successfully!');
-                        }
-                    } catch (err) {
-                        alert(`Failed to load layout JSON: ${err.message}`);
-                    }
-                };
-                reader.readAsText(e.target.files[0]);
-            }
-        });
-    }
-
     // =========================================================================
-    // 16. INITIAL STARTUP
+    // 17. INITIAL STARTUP
     // =========================================================================
     updateBezelFrameDimensions();
     loadPresetCivicAmoled();

@@ -17,7 +17,7 @@
                 <span class="logo-icon">🏎️</span>
                 <div class="brand-text">
                     <span class="brand-title">espDash <span class="badge badge-pro">STUDIO</span></span>
-                    <span class="brand-sub">ESP32 1-to-1 Pixel Dashboard Builder</span>
+                    <span class="brand-sub">1-to-1 Pixel Dashboard Engine & LVGL 8.4 Exporter</span>
                 </div>
             </div>
             
@@ -39,8 +39,20 @@
                     </optgroup>
                 </select>
 
+                <!-- One-Click Theme Switcher -->
+                <label for="themeSelect" style="margin-left: 6px;">🎨 Theme:</label>
+                <select id="themeSelect" class="styled-select theme-select">
+                    <option value="civic-eco">🌲 Civic Eco (Green & Cyan)</option>
+                    <option value="type-r">🏎️ Type-R (Championship Red)</option>
+                    <option value="cyberpunk">⚡ Cyberpunk 2077 (Neon Pink & Cyan)</option>
+                    <option value="motorsport-gt3">🏁 Motorsport GT3 (Racing Yellow)</option>
+                    <option value="stealth-oled">🌑 Stealth OLED (Pure Black & White)</option>
+                    <option value="ice-titanium">🧊 Frozen Ice (Glacier Blue)</option>
+                    <option value="synthwave">🌌 Synthwave (Violet & Sunset)</option>
+                </select>
+
                 <div class="dropdown-menu-wrapper">
-                    <button id="presetsMenuBtn" class="btn-sm btn-secondary">📐 Load Layout ▾</button>
+                    <button id="presetsMenuBtn" class="btn-sm btn-secondary">📐 Layouts ▾</button>
                     <div id="presetsDropdown" class="dropdown-popover hidden">
                         <div class="dropdown-item" data-preset-layout="civic-amoled">🏎️ Civic 9G Eco Coach (AMOLED 454)</div>
                         <div class="dropdown-item" data-preset-layout="xiao-production">⭕ XIAO GC9A01 Gauge (240x240)</div>
@@ -67,7 +79,7 @@
             </div>
 
             <div class="action-buttons">
-                <button id="exportCodeBtn" class="btn btn-primary">⚡ Export C++ / LVGL</button>
+                <button id="exportCodeBtn" class="btn btn-primary">⚡ Export LVGL / C++</button>
                 <button id="exportJsonBtn" class="btn btn-secondary" title="Save JSON File">💾 Save</button>
                 <button id="importJsonBtn" class="btn btn-secondary" title="Open JSON File">📂 Open</button>
                 <input type="file" id="fileInput" accept=".json" style="display: none;">
@@ -80,14 +92,23 @@
             <aside class="sidebar left-palette">
                 <div class="panel-header">
                     <h3>Widgets Library</h3>
-                    <span class="count-badge" id="widgetCountBadge">13 widgets</span>
+                    <span class="count-badge" id="widgetCountBadge">18 widgets</span>
                 </div>
                 <div class="widget-list">
+                    <!-- Gauge & Tachometer Widgets -->
+                    <div class="widget-category-title">🏁 Tachometer & Gauges</div>
                     <div class="widget-item" data-type="shift-lights" draggable="true">
                         <span class="widget-icon">🚥</span>
                         <div class="widget-info">
-                            <span class="widget-title">Shift Lights</span>
-                            <span class="widget-desc">Progressive curved LED arch</span>
+                            <span class="widget-title">Shift Lights Arch</span>
+                            <span class="widget-desc">Curved tachometer LED arch</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="rev-strip" draggable="true">
+                        <span class="widget-icon">🏎️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">F1 Rev Strip Bar</span>
+                            <span class="widget-desc">Horizontal sequential LED strip</span>
                         </div>
                     </div>
                     <div class="widget-item" data-type="smooth-arc" draggable="true">
@@ -97,18 +118,18 @@
                             <span class="widget-desc">Anti-aliased gradient arc</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="digital-value" draggable="true">
-                        <span class="widget-icon">🔢</span>
-                        <div class="widget-info">
-                            <span class="widget-title">7-Segment / Digit</span>
-                            <span class="widget-desc">Ghost backdrop & telemetry</span>
-                        </div>
-                    </div>
                     <div class="widget-item" data-type="dial-needle" draggable="true">
                         <span class="widget-icon">🧭</span>
                         <div class="widget-info">
                             <span class="widget-title">Dial Needle</span>
                             <span class="widget-desc">Analog needle with center hub</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="boost-gauge" draggable="true">
+                        <span class="widget-icon">🚀</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Turbo Boost Gauge</span>
+                            <span class="widget-desc">Vacuum/Boost PSI dial & peak hold</span>
                         </div>
                     </div>
                     <div class="widget-item" data-type="gauge-ticks" draggable="true">
@@ -118,11 +139,35 @@
                             <span class="widget-desc">Radial dial ticks & scale numbers</span>
                         </div>
                     </div>
+
+                    <!-- Digital Readout & Motorsport Telemetry -->
+                    <div class="widget-category-title">🔢 Digital & Telemetry</div>
+                    <div class="widget-item" data-type="digital-value" draggable="true">
+                        <span class="widget-icon">🔢</span>
+                        <div class="widget-info">
+                            <span class="widget-title">7-Segment / Digit</span>
+                            <span class="widget-desc">Ghost backdrop & telemetry</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="lap-timer" draggable="true">
+                        <span class="widget-icon">⏱️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Lap Timer & Delta</span>
+                            <span class="widget-desc">Lap time, split delta +/- trace</span>
+                        </div>
+                    </div>
                     <div class="widget-item" data-type="bar-slider" draggable="true">
                         <span class="widget-icon">📊</span>
                         <div class="widget-info">
                             <span class="widget-title">Telemetry Bar</span>
                             <span class="widget-desc">Linear progress bar slider</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="temp-stack" draggable="true">
+                        <span class="widget-icon">🌡️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Dual Temp Stack</span>
+                            <span class="widget-desc">Oil & Water temperature bars</span>
                         </div>
                     </div>
                     <div class="widget-item" data-type="history-chart" draggable="true">
@@ -140,10 +185,34 @@
                         </div>
                     </div>
                     <div class="widget-item" data-type="tpms-map" draggable="true">
-                        <span class="widget-icon">🏎️</span>
+                        <span class="widget-icon">🚗</span>
                         <div class="widget-info">
                             <span class="widget-title">TPMS Chassis Map</span>
                             <span class="widget-desc">4-wheel pressure/temp grid</span>
+                        </div>
+                    </div>
+
+                    <!-- Navigation, Badges & Labels -->
+                    <div class="widget-category-title">🚨 Indicators & Containers</div>
+                    <div class="widget-item" data-type="battery-meter" draggable="true">
+                        <span class="widget-icon">🔋</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Battery Voltage Gauge</span>
+                            <span class="widget-desc">Voltage level & charge status</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="compass-dial" draggable="true">
+                        <span class="widget-icon">🧭</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Heading Compass</span>
+                            <span class="widget-desc">360° heading tape & cardinal dial</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="speed-sign" draggable="true">
+                        <span class="widget-icon">🛑</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Speed Limit Sign</span>
+                            <span class="widget-desc">Road speed sign badge</span>
                         </div>
                     </div>
                     <div class="widget-item" data-type="annunciator-icon" draggable="true">
@@ -176,11 +245,12 @@
                     </div>
                 </div>
 
-                <div class="panel-header" style="margin-top: 12px;">
+                <div class="panel-header" style="margin-top: 8px;">
                     <h3>Layers</h3>
                     <div class="layer-actions">
                         <button id="layerUpBtn" class="btn-icon" title="Move Layer Up">▲</button>
                         <button id="layerDownBtn" class="btn-icon" title="Move Layer Down">▼</button>
+                        <button id="clearLayersBtn" class="btn-icon" style="color: var(--accent-red);" title="Clear All Layers">🗑️</button>
                     </div>
                 </div>
                 <div id="layersList" class="layers-list">
@@ -202,7 +272,7 @@
                     <button class="btn-icon" id="alignBottomBtn" title="Align Bottom">⫰</button>
                     <span class="toolbar-divider"></span>
                     <button class="btn-icon" id="duplicateWidgetBtn" title="Duplicate Selected (Ctrl+D)">⧉</button>
-                    <button class="btn-icon" id="deleteWidgetBtn" title="Delete Selected (Del)">🗑️</button>
+                    <button class="btn-icon btn-danger" id="deleteWidgetBtn" title="Delete Selected (Del)">🗑️ Delete</button>
                 </div>
 
                 <div class="viewport-wrapper" id="viewportWrapper">
@@ -214,8 +284,8 @@
                 <div class="viewport-info-bar">
                     <span id="canvasDimInfo">Resolution: 454 × 454 (ROUND AMOLED QSPI)</span>
                     <span id="cursorPosInfo">X: 0, Y: 0</span>
-                    <span id="activeFontInfo">Loaded Fonts: 9 families</span>
-                    <span id="fpsInfo">Simulation: 50 FPS</span>
+                    <span id="activeFontInfo">Loaded Fonts: 10 families</span>
+                    <span id="fpsInfo">Simulation: 50 FPS (LVGL 8.4 Ready)</span>
                 </div>
             </section>
 
@@ -236,7 +306,7 @@
                 <div class="sim-header">
                     <div class="sim-title-group">
                         <span class="sim-title">🏎️ Telemetry Simulator</span>
-                        <span class="sim-mode-badge" id="simModeBadge">MANUAL</span>
+                        <span class="sim-mode-badge" id="simModeBadge">MANUAL (50Hz)</span>
                     </div>
                     <div class="sim-btn-group">
                         <button id="simPlayPauseBtn" class="btn-sm btn-accent">▶ Sweep Test</button>
@@ -265,12 +335,20 @@
                         <input type="range" id="simBrake" min="0" max="100" value="42">
                     </div>
                     <div class="sim-field">
+                        <label>Boost <span id="valBoost">1.2</span> bar</label>
+                        <input type="range" id="simBoost" min="-10" max="25" value="12">
+                    </div>
+                    <div class="sim-field">
                         <label>Fuel <span id="valFuel">75</span>%</label>
                         <input type="range" id="simFuel" min="0" max="100" value="75">
                     </div>
                     <div class="sim-field">
                         <label>Water Temp <span id="valWater">92</span>°C</label>
                         <input type="range" id="simWater" min="40" max="130" value="92">
+                    </div>
+                    <div class="sim-field">
+                        <label>Oil Temp <span id="valOil">98</span>°C</label>
+                        <input type="range" id="simOil" min="40" max="150" value="98">
                     </div>
                     <div class="sim-field">
                         <label>Battery <span id="valBatt">13.8</span>V</label>
@@ -302,14 +380,14 @@
         <div class="modal-card">
             <div class="modal-header">
                 <div class="modal-title-tabs">
-                    <button class="modal-tab-btn active" id="tabCppBtn">⚡ TFT_eSPI C++ (Sprites)</button>
-                    <button class="modal-tab-btn" id="tabLvglBtn">📱 LVGL 8.3 C Code (screens.c)</button>
+                    <button class="modal-tab-btn active" id="tabLvglBtn">📱 LVGL 8.4 C Code (screens.c & 50Hz tick)</button>
+                    <button class="modal-tab-btn" id="tabCppBtn">⚡ TFT_eSPI C++ (Double-Buffered Sprites)</button>
                     <button class="modal-tab-btn" id="tabJsonBtn">💾 JSON Layout</button>
                 </div>
                 <button id="closeModalBtn" class="close-btn">&times;</button>
             </div>
             <div class="modal-body">
-                <p id="modalSnippetDesc">Copy and paste this production double-buffered rendering code directly into your ESP32 display node firmware:</p>
+                <p id="modalSnippetDesc">High-performance zero-allocation LVGL 8.4 C code optimized for 50Hz smooth updates without screen tearing:</p>
                 <pre><code id="codeSnippet" class="code-block"></code></pre>
             </div>
             <div class="modal-footer">

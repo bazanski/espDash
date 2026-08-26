@@ -307,25 +307,95 @@ body {
     color: var(--accent-cyan);
 }
 
-.btn-icon {
-    width: 28px;
-    height: 28px;
+.theme-select {
+    border-color: #a855f7;
+    background: #150f29;
+    color: #e9d5ff;
+    font-weight: 600;
+}
+
+.theme-select:focus {
+    border-color: #c084fc;
+    box-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
+}
+
+.btn-danger {
+    background: rgba(255, 51, 102, 0.15);
+    border: 1px solid rgba(255, 51, 102, 0.4);
+    color: #ff3366;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    width: auto;
+}
+
+.btn-danger:hover {
+    background: rgba(255, 51, 102, 0.35);
+    border-color: #ff3366;
+    color: #ffffff;
+    box-shadow: 0 0 10px rgba(255, 51, 102, 0.4);
+}
+
+.btn-delete-widget {
+    background: linear-gradient(135deg, rgba(255, 51, 102, 0.2), rgba(220, 38, 38, 0.3));
+    border: 1px solid #ff3366;
+    color: #ff4d79;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--card-bg);
-    border: 1px solid var(--border-color);
-    border-radius: 5px;
-    color: var(--text-primary);
+    gap: 8px;
+    transition: all 0.2s ease;
+    margin-top: 4px;
+}
+
+.btn-delete-widget:hover {
+    background: #ff3366;
+    color: #ffffff;
+    box-shadow: 0 0 15px rgba(255, 51, 102, 0.6);
+    transform: translateY(-1px);
+}
+
+.widget-category-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--accent-cyan);
+    padding: 6px 4px 2px 4px;
+    border-bottom: 1px solid rgba(0, 240, 255, 0.15);
+    margin-top: 4px;
+}
+
+.layer-btn-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.layer-icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
     cursor: pointer;
-    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 3px;
     transition: all 0.15s ease;
 }
 
-.btn-icon:hover {
-    background: var(--card-hover);
-    border-color: var(--accent-cyan);
-    color: var(--accent-cyan);
+.layer-icon-btn:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.layer-icon-btn.delete-layer:hover {
+    color: var(--accent-red);
+    background: rgba(255, 51, 102, 0.2);
 }
 
 /* =========================================================================

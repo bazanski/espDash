@@ -2,7 +2,7 @@
 """
 Unit tests for espDash UI Studio & Telemetry Builder (web-dashboard/ui-builder)
 Validates device presets, widget definitions, color conversion, font mapping,
-and code generation logic.
+theme selector, delete tools, and 50Hz LVGL 8.4 code generation logic.
 """
 
 import os
@@ -23,7 +23,7 @@ class TestUIBuilderAssets(unittest.TestCase):
             fpath = os.path.join(UI_BUILDER_DIR, fname)
             self.assertTrue(os.path.isfile(fpath), f"Missing required file: {fname}")
 
-    def test_index_html_contains_fonts_and_presets(self):
+    def test_index_html_contains_fonts_presets_and_themes(self):
         index_path = os.path.join(UI_BUILDER_DIR, "index.html")
         with open(index_path, "r", encoding="utf-8") as f:
             html = f.read()
@@ -42,18 +42,31 @@ class TestUIBuilderAssets(unittest.TestCase):
         self.assertIn('value="xiao-dual-round"', html)
         self.assertIn('value="esp32-s3-lcd-314"', html)
 
-        # Check widget library items
+        # Check Theme Switcher
+        self.assertIn('id="themeSelect"', html)
+        self.assertIn('value="civic-eco"', html)
+        self.assertIn('value="type-r"', html)
+        self.assertIn('value="cyberpunk"', html)
+        self.assertIn('value="motorsport-gt3"', html)
+        self.assertIn('value="stealth-oled"', html)
+
+        # Check delete tools
+        self.assertIn('id="deleteWidgetBtn"', html)
+        self.assertIn('id="clearLayersBtn"', html)
+
+        # Check full widget library items (all 18 widgets)
         required_widgets = [
-            "shift-lights", "smooth-arc", "digital-value", "dial-needle",
-            "gauge-ticks", "bar-slider", "history-chart", "g-force-meter",
-            "tpms-map", "annunciator-icon", "status-badge", "text-label", "card-box"
+            "shift-lights", "rev-strip", "smooth-arc", "dial-needle", "boost-gauge",
+            "gauge-ticks", "digital-value", "lap-timer", "bar-slider", "temp-stack",
+            "history-chart", "g-force-meter", "tpms-map", "battery-meter", "compass-dial",
+            "speed-sign", "annunciator-icon", "status-badge", "text-label", "card-box"
         ]
         for w in required_widgets:
             self.assertIn(f'data-type="{w}"', html, f"Widget palette missing {w}")
 
         # Check modal tabs
-        self.assertIn("tabCppBtn", html)
         self.assertIn("tabLvglBtn", html)
+        self.assertIn("tabCppBtn", html)
         self.assertIn("tabJsonBtn", html)
 
     def test_style_css_font_faces_and_bezels(self):
@@ -66,6 +79,8 @@ class TestUIBuilderAssets(unittest.TestCase):
         self.assertIn("round-display", css)
         self.assertIn("rect-display", css)
         self.assertIn("dual-round-display", css)
+        self.assertIn("btn-delete-widget", css)
+        self.assertIn("layer-btn-group", css)
         self.assertIn("modal-card", css)
 
 
@@ -117,7 +132,6 @@ class TestCodeGeneratorLogic(unittest.TestCase):
         self.assertEqual(self.hex_to_rgb565("#0000FF"), "0x001F")
 
     def test_lvgl_font_mappings(self):
-        # 7-Segment & DSEG fonts
         self.assertEqual(self.map_lvgl_font("Segment7", 120), "&ui_font_segment7_120")
         self.assertEqual(self.map_lvgl_font("Segment7", 96), "&ui_font_segment7_80")
         self.assertEqual(self.map_lvgl_font("DSEG7-Classic", 60), "&ui_font_dseg_regular_60")
@@ -126,7 +140,6 @@ class TestCodeGeneratorLogic(unittest.TestCase):
         self.assertEqual(self.map_lvgl_font("DSEG7-Classic", 20), "&ui_font_dseg_regular_20")
         self.assertEqual(self.map_lvgl_font("DSEG7-Classic", 12), "&ui_font_dseg_mini_light_20")
 
-        # Montserrat standard sizes
         self.assertEqual(self.map_lvgl_font("Montserrat", 18), "&lv_font_montserrat_18")
         self.assertEqual(self.map_lvgl_font("Montserrat", 24), "&lv_font_montserrat_24")
         self.assertEqual(self.map_lvgl_font("Inter", 32), "&lv_font_montserrat_32")
@@ -149,11 +162,19 @@ class TestCodeGeneratorLogic(unittest.TestCase):
                 "color": "#ffffff",
                 "binding": "speed_kmh",
                 "showGhost": True
+            },
+            {
+                "id": "boost_gauge",
+                "type": "boost-gauge",
+                "x": 120,
+                "y": 120,
+                "radius": 60,
+                "binding": "boost_bar"
             }
         ]
 
         payload = {
-            "schemaVersion": "2.0",
+            "schemaVersion": "2.1",
             "preset": preset,
             "widgets": widgets
         }
@@ -161,11 +182,11 @@ class TestCodeGeneratorLogic(unittest.TestCase):
         serialized = json.dumps(payload, indent=2)
         deserialized = json.loads(serialized)
 
-        self.assertEqual(deserialized["schemaVersion"], "2.0")
+        self.assertEqual(deserialized["schemaVersion"], "2.1")
         self.assertEqual(deserialized["preset"]["width"], 454)
-        self.assertEqual(len(deserialized["widgets"]), 1)
+        self.assertEqual(len(deserialized["widgets"]), 2)
         self.assertEqual(deserialized["widgets"][0]["fontSize"], 96)
-        self.assertTrue(deserialized["widgets"][0]["showGhost"])
+        self.assertEqual(deserialized["widgets"][1]["type"], "boost-gauge")
 
 
 if __name__ == "__main__":
