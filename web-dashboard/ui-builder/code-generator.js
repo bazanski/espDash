@@ -1,7 +1,7 @@
 /**
  * espDash UI Studio - Multi-Target Code Generator
  * Converts 1-to-1 canvas widgets into:
- * 1. High-Performance Native LVGL 8.4 C Code with 50Hz Batched Updates (screens.c / ui.c)
+ * 1. High-Performance Native LVGL 8.4 C Code with 50Hz Batched Updates & Nav Support (screens.c / ui.c)
  * 2. Double-buffered TFT_eSPI C++ Sprite Rendering Code (XIAO / SPI nodes)
  * 3. JSON Project Schema (Import/Export)
  */
@@ -39,7 +39,6 @@ window.CodeGenerator = {
             return '&ui_font_dseg_mini_light_20';
         }
 
-        // Standard Montserrat font sizes built into LVGL
         const montserratSizes = [8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48];
         let closest = montserratSizes.reduce((prev, curr) => Math.abs(curr - size) < Math.abs(prev - size) ? curr : prev);
         return `&lv_font_montserrat_${closest}`;
@@ -60,7 +59,7 @@ window.CodeGenerator = {
         code += `#include "fonts.h"\n`;
         code += `#include "styles.h"\n`;
         code += `#include "ui.h"\n`;
-        code += `#include <EspDashProto.h> // Shared telemetry wire protocol\n\n`;
+        code += `#include <EspDashProto.h> // Shared telemetry & nav wire protocol\n\n`;
 
         // 1. Screen Init Function
         code += `void create_screen_main() {\n`;
@@ -102,7 +101,9 @@ window.CodeGenerator = {
 
                 case 'digital-value':
                 case 'text-label':
-                case 'lap-timer': {
+                case 'lap-timer':
+                case 'nav-maneuver-banner':
+                case 'nav-eta-badge': {
                     const fontDescriptor = this.mapLvglFont(w.fontFamily, w.fontSize);
                     code += `        lv_obj_t *obj = lv_label_create(parent_obj);\n`;
                     code += `        objects.${varName} = obj;\n`;
@@ -111,6 +112,20 @@ window.CodeGenerator = {
                     code += `        lv_obj_set_style_text_color(obj, lv_color_hex(${colorHex}), LV_PART_MAIN);\n`;
                     code += `        lv_obj_set_style_text_font(obj, ${fontDescriptor}, LV_PART_MAIN);\n`;
                     code += `        lv_label_set_text_static(obj, "${w.text || w.value || '0'}${w.unit || ''}");\n`;
+                    break;
+                }
+
+                case 'nav-turn-arrow':
+                case 'nav-camera-alert':
+                case 'nav-hazard-alert':
+                case 'nav-lane-assist': {
+                    code += `        lv_obj_t *obj = lv_obj_create(parent_obj);\n`;
+                    code += `        objects.${varName} = obj;\n`;
+                    code += `        lv_obj_set_pos(obj, ${w.x - 30}, ${w.y - 30});\n`;
+                    code += `        lv_obj_set_size(obj, ${w.w || 60}, ${w.h || 60});\n`;
+                    code += `        lv_obj_set_style_bg_color(obj, lv_color_hex(${bgHex}), LV_PART_MAIN);\n`;
+                    code += `        lv_obj_set_style_border_color(obj, lv_color_hex(${colorHex}), LV_PART_MAIN);\n`;
+                    code += `        lv_obj_set_style_radius(obj, ${w.borderRadius || 8}, LV_PART_MAIN);\n`;
                     break;
                 }
 
@@ -147,18 +162,6 @@ window.CodeGenerator = {
                     break;
                 }
 
-                case 'history-chart': {
-                    code += `        lv_obj_t *obj = lv_chart_create(parent_obj);\n`;
-                    code += `        objects.${varName} = obj;\n`;
-                    code += `        lv_obj_set_pos(obj, ${w.x}, ${w.y});\n`;
-                    code += `        lv_obj_set_size(obj, ${w.w || 260}, ${w.h || 120});\n`;
-                    code += `        lv_chart_set_type(obj, LV_CHART_TYPE_LINE);\n`;
-                    code += `        lv_obj_set_style_bg_color(obj, lv_color_hex(${bgHex}), LV_PART_MAIN);\n`;
-                    code += `        lv_chart_series_t *ser = lv_chart_add_series(obj, lv_color_hex(${colorHex}), LV_CHART_AXIS_PRIMARY_Y);\n`;
-                    code += `        (void)ser;\n`;
-                    break;
-                }
-
                 default: {
                     code += `        lv_obj_t *obj = lv_obj_create(parent_obj);\n`;
                     code += `        objects.${varName} = obj;\n`;
@@ -178,7 +181,7 @@ window.CodeGenerator = {
 
         // 2. High-Performance 50Hz Update Loop
         code += `// =========================================================================\n`;
-        code += `// 50Hz Zero-Allocation Telemetry Tick Handler\n`;
+        code += `// 50Hz Zero-Allocation Telemetry & Nav Tick Handler\n`;
         code += `// Call this directly from your ESP-NOW packet handler or 20-50Hz timer\n`;
         code += `// =========================================================================\n`;
         code += `void update_screen_ui(const EspDashTelemetry &pkt) {\n`;
@@ -224,11 +227,10 @@ window.CodeGenerator = {
         code += `// =========================================================================\n\n`;
         code += `#include <Arduino.h>\n`;
         code += `#include <TFT_eSPI.h>\n`;
-        code += `#include <EspDashProto.h> // Shared telemetry wire protocol\n\n`;
+        code += `#include <EspDashProto.h> // Shared telemetry & nav wire protocol\n\n`;
         code += `static TFT_eSPI tft = TFT_eSPI();\n`;
         code += `static TFT_eSprite spr = TFT_eSprite(&tft);\n\n`;
 
-        // Color definitions
         code += `// Color Definitions (16-bit RGB565)\n`;
         code += `#define COLOR_BG ${this.hexToRgb565('#050811')}\n`;
         
@@ -244,7 +246,6 @@ window.CodeGenerator = {
         });
         code += `\n`;
 
-        // Setup Function
         code += `void initDisplayUI() {\n`;
         code += `    tft.init();\n`;
         if (devicePreset.rotation !== undefined) {
@@ -255,7 +256,6 @@ window.CodeGenerator = {
         code += `    spr.createSprite(${devicePreset.width}, ${devicePreset.height});\n`;
         code += `}\n\n`;
 
-        // Render Loop Function
         code += `void renderCustomUI(const EspDashTelemetry& telemetry) {\n`;
         code += `    spr.fillSprite(COLOR_BG);\n\n`;
 
@@ -287,18 +287,25 @@ window.CodeGenerator = {
                     break;
                 }
 
-                case 'rev-strip': {
-                    const rpmVal = w.binding ? `telemetry.${w.binding}` : `5400`;
+                case 'nav-turn-arrow': {
                     code += `    {\n`;
-                    code += `        const int count = ${w.ledCount || 16};\n`;
-                    code += `        float pct = min(1.0f, (float)${rpmVal} / ${(w.max || 8000)}.0f);\n`;
-                    code += `        int wLed = (${w.w || 200} - (count - 1) * 3) / count;\n`;
-                    code += `        for (int i = 0; i < count; i++) {\n`;
-                    code += `            int lx = ${w.x} + i * (wLed + 3);\n`;
-                    code += `            uint16_t col = ((float)(i + 1) / count <= pct) ? COLOR_WIDGET_${idx + 1} : COLOR_TRACK_${idx + 1};\n`;
-                    code += `            spr.fillRoundRect(lx, ${w.y}, wLed, ${w.h || 12}, 2, col);\n`;
-                    code += `        }\n`;
+                    code += `        spr.fillRoundRect(${w.x - 30}, ${w.y - 30}, 60, 60, 8, COLOR_BG_${idx + 1});\n`;
+                    code += `        spr.drawRoundRect(${w.x - 30}, ${w.y - 30}, 60, 60, 8, COLOR_WIDGET_${idx + 1});\n`;
+                    code += `        spr.setTextColor(COLOR_WIDGET_${idx + 1}, COLOR_BG_${idx + 1});\n`;
+                    code += `        spr.setTextDatum(MC_DATUM);\n`;
+                    code += `        spr.drawString("↗", ${w.x}, ${w.y}, 4);\n`;
                     code += `    }\n`;
+                    break;
+                }
+
+                case 'digital-value':
+                case 'text-label':
+                case 'nav-maneuver-banner':
+                case 'nav-eta-badge': {
+                    const textValExpr = w.binding ? `String(telemetry.${w.binding})` : `"${w.text || w.value || '0'}"`;
+                    code += `    spr.setTextColor(COLOR_WIDGET_${idx + 1}, COLOR_BG);\n`;
+                    code += `    spr.setTextDatum(MC_DATUM);\n`;
+                    code += `    spr.drawString((${textValExpr} + "${w.unit || ''}").c_str(), ${w.x}, ${w.y}, 4);\n`;
                     break;
                 }
 
@@ -308,79 +315,8 @@ window.CodeGenerator = {
                     code += `    {\n`;
                     code += `        int val = ${arcValExpr};\n`;
                     code += `        int mappedAngle = map(val, ${w.min || 0}, ${w.max || 100}, ${w.startAngle || 135}, ${w.endAngle || 405});\n`;
-                    code += `        // Background Track Arc\n`;
                     code += `        spr.drawSmoothArc(${w.x}, ${w.y}, ${w.radius}, ${w.radius - (w.thickness || 12)}, ${w.startAngle || 135}, ${w.endAngle || 405}, COLOR_TRACK_${idx + 1}, COLOR_BG, true);\n`;
-                    code += `        // Dynamic Active Arc\n`;
                     code += `        spr.drawSmoothArc(${w.x}, ${w.y}, ${w.radius}, ${w.radius - (w.thickness || 12)}, ${w.startAngle || 135}, mappedAngle, COLOR_WIDGET_${idx + 1}, COLOR_BG, true);\n`;
-                    code += `    }\n`;
-                    break;
-                }
-
-                case 'digital-value': {
-                    const textValExpr = w.binding ? `String(telemetry.${w.binding})` : `"${w.value || '0'}"`;
-                    code += `    spr.setTextColor(COLOR_WIDGET_${idx + 1}, COLOR_BG);\n`;
-                    code += `    spr.setTextDatum(MC_DATUM); // Middle Center\n`;
-                    code += `    spr.drawString((${textValExpr} + "${w.unit || ''}").c_str(), ${w.x}, ${w.y}, 4);\n`;
-                    break;
-                }
-
-                case 'bar-slider':
-                case 'temp-stack':
-                case 'battery-meter': {
-                    const barValExpr = w.binding ? `telemetry.${w.binding}` : w.value || 50;
-                    code += `    {\n`;
-                    code += `        int val = ${barValExpr};\n`;
-                    code += `        int fillW = map(val, ${w.min || 0}, ${w.max || 100}, 0, ${w.w || 140});\n`;
-                    code += `        spr.fillRect(${w.x}, ${w.y}, ${w.w || 140}, ${w.h || 16}, COLOR_BG_${idx + 1});\n`;
-                    code += `        spr.fillRect(${w.x}, ${w.y}, fillW, ${w.h || 16}, COLOR_WIDGET_${idx + 1});\n`;
-                    code += `    }\n`;
-                    break;
-                }
-
-                case 'dial-needle':
-                case 'compass-dial': {
-                    const needleValExpr = w.binding ? `telemetry.${w.binding}` : w.value || 50;
-                    code += `    {\n`;
-                    code += `        float nNorm = (float)(${needleValExpr} - ${w.min || 0}) / (${(w.max || 100) - (w.min || 0)});\n`;
-                    code += `        float rad = (${w.startAngle || 135} + nNorm * (${(w.endAngle || 405) - (w.startAngle || 135)})) * DEG_TO_RAD;\n`;
-                    code += `        int tipX = ${w.x} + cos(rad) * ${w.radius || 70};\n`;
-                    code += `        int tipY = ${w.y} + sin(rad) * ${w.radius || 70};\n`;
-                    code += `        spr.drawWideLine(${w.x}, ${w.y}, tipX, tipY, 4, COLOR_WIDGET_${idx + 1}, COLOR_BG);\n`;
-                    code += `        spr.fillCircle(${w.x}, ${w.y}, 8, COLOR_WIDGET_${idx + 1});\n`;
-                    code += `    }\n`;
-                    break;
-                }
-
-                case 'gauge-ticks': {
-                    code += `    {\n`;
-                    code += `        const int tickCount = ${w.tickCount || 9};\n`;
-                    code += `        for (int i = 0; i < tickCount; i++) {\n`;
-                    code += `            float rad = (${w.startAngle || 135} + ((float)i / (tickCount - 1)) * (${(w.endAngle || 405) - (w.startAngle || 135)})) * DEG_TO_RAD;\n`;
-                    code += `            int x1 = ${w.x} + cos(rad) * ${w.radius || 100};\n`;
-                    code += `            int y1 = ${w.y} + sin(rad) * ${w.radius || 100};\n`;
-                    code += `            int x2 = ${w.x} + cos(rad) * ${(w.radius || 100) - (w.tickLen || 10)};\n`;
-                    code += `            int y2 = ${w.y} + sin(rad) * ${(w.radius || 100) - (w.tickLen || 10)};\n`;
-                    code += `            spr.drawLine(x1, y1, x2, y2, COLOR_WIDGET_${idx + 1});\n`;
-                    code += `        }\n`;
-                    code += `    }\n`;
-                    break;
-                }
-
-                case 'text-label':
-                case 'speed-sign': {
-                    code += `    spr.setTextColor(COLOR_WIDGET_${idx + 1}, COLOR_BG);\n`;
-                    code += `    spr.setTextDatum(MC_DATUM);\n`;
-                    code += `    spr.drawString("${w.text || 'LABEL'}", ${w.x}, ${w.y}, 2);\n`;
-                    break;
-                }
-
-                case 'status-badge': {
-                    const flagExpr = w.binding ? `(telemetry.${w.binding} != 0)` : `true`;
-                    code += `    if (${flagExpr}) {\n`;
-                    code += `        spr.fillRoundRect(${w.x - 30}, ${w.y - 12}, 60, 24, 6, COLOR_WIDGET_${idx + 1});\n`;
-                    code += `        spr.setTextColor(COLOR_BG);\n`;
-                    code += `        spr.setTextDatum(MC_DATUM);\n`;
-                    code += `        spr.drawString("${w.text || 'ALERT'}", ${w.x}, ${w.y}, 2);\n`;
                     code += `    }\n`;
                     break;
                 }
@@ -399,7 +335,6 @@ window.CodeGenerator = {
             code += `\n`;
         });
 
-        code += `    // Push double-buffer frame to physical display at 50 FPS\n`;
         code += `    spr.pushSprite(0, 0);\n`;
         code += `}\n`;
 
@@ -411,7 +346,7 @@ window.CodeGenerator = {
      */
     generateJson: function(devicePreset, widgets) {
         return JSON.stringify({
-            schemaVersion: "2.1",
+            schemaVersion: "2.2",
             timestamp: new Date().toISOString(),
             preset: devicePreset,
             widgets: widgets

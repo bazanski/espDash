@@ -17,7 +17,7 @@
                 <span class="logo-icon">🏎️</span>
                 <div class="brand-text">
                     <span class="brand-title">espDash <span class="badge badge-pro">STUDIO</span></span>
-                    <span class="brand-sub">1-to-1 Pixel Dashboard Engine & LVGL 8.4 Exporter</span>
+                    <span class="brand-sub">1-to-1 Pixel Dashboard Engine, Nav & LVGL 8.4 Exporter</span>
                 </div>
             </div>
             
@@ -55,6 +55,8 @@
                     <button id="presetsMenuBtn" class="btn-sm btn-secondary">📐 Layouts ▾</button>
                     <div id="presetsDropdown" class="dropdown-popover hidden">
                         <div class="dropdown-item" data-preset-layout="civic-amoled">🏎️ Civic 9G Eco Coach (AMOLED 454)</div>
+                        <div class="dropdown-item" data-preset-layout="nav-amoled">🗺️ Waze / GMaps Nav Cockpit (AMOLED 454)</div>
+                        <div class="dropdown-item" data-preset-layout="nav-highway-314">🛣️ Waze Highway & Radar (3.14 800x240)</div>
                         <div class="dropdown-item" data-preset-layout="xiao-production">⭕ XIAO GC9A01 Gauge (240x240)</div>
                         <div class="dropdown-item" data-preset-layout="xiao-eez">📱 XIAO EEZ Studio Screen 1 (240x240)</div>
                         <div class="dropdown-item" data-preset-layout="racelab-314">📊 RaceLab Bar & TPMS (800x240)</div>
@@ -92,9 +94,54 @@
             <aside class="sidebar left-palette">
                 <div class="panel-header">
                     <h3>Widgets Library</h3>
-                    <span class="count-badge" id="widgetCountBadge">18 widgets</span>
+                    <span class="count-badge" id="widgetCountBadge">24 widgets</span>
                 </div>
                 <div class="widget-list">
+                    <!-- Navigation & GPS Category -->
+                    <div class="widget-category-title">🗺️ Navigation & Waze / GMaps</div>
+                    <div class="widget-item" data-type="nav-turn-arrow" draggable="true">
+                        <span class="widget-icon">↗️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Turn Arrow Indicator</span>
+                            <span class="widget-desc">Maneuver arrow + distance</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="nav-maneuver-banner" draggable="true">
+                        <span class="widget-icon">🛣️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Next Road Banner</span>
+                            <span class="widget-desc">Next street name & distance</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="nav-eta-badge" draggable="true">
+                        <span class="widget-icon">⏱️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">ETA & Trip Badge</span>
+                            <span class="widget-desc">Time, remaining km, arrival</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="nav-lane-assist" draggable="true">
+                        <span class="widget-icon">🚗</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Lane Guidance</span>
+                            <span class="widget-desc">Multi-lane highway assist</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="nav-camera-alert" draggable="true">
+                        <span class="widget-icon">📸</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Speed Camera / Radar</span>
+                            <span class="widget-desc">Speed trap warning & limit</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="nav-hazard-alert" draggable="true">
+                        <span class="widget-icon">⚠️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Road Hazard Alert</span>
+                            <span class="widget-desc">Police, accident, traffic jam</span>
+                        </div>
+                    </div>
+
                     <!-- Gauge & Tachometer Widgets -->
                     <div class="widget-category-title">🏁 Tachometer & Gauges</div>
                     <div class="widget-item" data-type="shift-lights" draggable="true">
@@ -185,7 +232,7 @@
                         </div>
                     </div>
                     <div class="widget-item" data-type="tpms-map" draggable="true">
-                        <span class="widget-icon">🚗</span>
+                        <span class="widget-icon">🚙</span>
                         <div class="widget-info">
                             <span class="widget-title">TPMS Chassis Map</span>
                             <span class="widget-desc">4-wheel pressure/temp grid</span>
@@ -295,7 +342,7 @@
                     <h3 id="inspectorTitle">Widget Inspector</h3>
                 </div>
                 <div id="inspectorContent" class="inspector-content">
-                    <p class="no-selection-msg">Select a widget on the canvas to configure properties & typography</p>
+                    <p class="no-selection-msg">Select a widget on the canvas to configure properties, navigation & typography</p>
                 </div>
             </aside>
         </main>
@@ -305,7 +352,7 @@
             <div class="telemetry-sim-panel">
                 <div class="sim-header">
                     <div class="sim-title-group">
-                        <span class="sim-title">🏎️ Telemetry Simulator</span>
+                        <span class="sim-title">🏎️ Telemetry & Navigation Simulator</span>
                         <span class="sim-mode-badge" id="simModeBadge">MANUAL (50Hz)</span>
                     </div>
                     <div class="sim-btn-group">
@@ -335,20 +382,30 @@
                         <input type="range" id="simBrake" min="0" max="100" value="42">
                     </div>
                     <div class="sim-field">
+                        <label>Nav Dist <span id="valNavDist">350</span> m</label>
+                        <input type="range" id="simNavDist" min="0" max="2000" value="350">
+                    </div>
+                    <div class="sim-field">
+                        <label>Turn Type</label>
+                        <select id="simNavManeuver" class="styled-select" style="padding: 2px 4px; font-size: 11px;">
+                            <option value="turn-left">Turn Left ⬅️</option>
+                            <option value="turn-right" selected>Turn Right ➡️</option>
+                            <option value="slight-left">Slight Left ↖️</option>
+                            <option value="slight-right">Slight Right ↗️</option>
+                            <option value="sharp-left">Sharp Left ↩️</option>
+                            <option value="sharp-right">Sharp Right ↪️</option>
+                            <option value="roundabout">Roundabout 🔄</option>
+                            <option value="u-turn">U-Turn 🔁</option>
+                            <option value="straight">Straight ⬆️</option>
+                        </select>
+                    </div>
+                    <div class="sim-field">
                         <label>Boost <span id="valBoost">1.2</span> bar</label>
                         <input type="range" id="simBoost" min="-10" max="25" value="12">
                     </div>
                     <div class="sim-field">
-                        <label>Fuel <span id="valFuel">75</span>%</label>
-                        <input type="range" id="simFuel" min="0" max="100" value="75">
-                    </div>
-                    <div class="sim-field">
                         <label>Water Temp <span id="valWater">92</span>°C</label>
                         <input type="range" id="simWater" min="40" max="130" value="92">
-                    </div>
-                    <div class="sim-field">
-                        <label>Oil Temp <span id="valOil">98</span>°C</label>
-                        <input type="range" id="simOil" min="40" max="150" value="98">
                     </div>
                     <div class="sim-field">
                         <label>Battery <span id="valBatt">13.8</span>V</label>
@@ -397,6 +454,7 @@
         </div>
     </div>
 
+    <script src="icon-packs.js"></script>
     <script src="code-generator.js"></script>
     <script src="live-preview-bridge.js"></script>
     <script src="builder.js"></script>

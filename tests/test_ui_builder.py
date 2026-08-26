@@ -2,7 +2,7 @@
 """
 Unit tests for espDash UI Studio & Telemetry Builder (web-dashboard/ui-builder)
 Validates device presets, widget definitions, color conversion, font mapping,
-theme selector, delete tools, and 50Hz LVGL 8.4 code generation logic.
+theme selector, delete tools, navigation pack, icon packs, and 50Hz LVGL 8.4 code generation logic.
 """
 
 import os
@@ -18,7 +18,7 @@ class TestUIBuilderAssets(unittest.TestCase):
     """Test static files, markup, and CSS definitions in UI Builder."""
 
     def test_ui_builder_files_exist(self):
-        required_files = ["index.html", "style.css", "builder.js", "code-generator.js", "live-preview-bridge.js"]
+        required_files = ["index.html", "style.css", "builder.js", "code-generator.js", "icon-packs.js", "live-preview-bridge.js"]
         for fname in required_files:
             fpath = os.path.join(UI_BUILDER_DIR, fname)
             self.assertTrue(os.path.isfile(fpath), f"Missing required file: {fname}")
@@ -42,6 +42,10 @@ class TestUIBuilderAssets(unittest.TestCase):
         self.assertIn('value="xiao-dual-round"', html)
         self.assertIn('value="esp32-s3-lcd-314"', html)
 
+        # Check Navigation Presets
+        self.assertIn('data-preset-layout="nav-amoled"', html)
+        self.assertIn('data-preset-layout="nav-highway-314"', html)
+
         # Check Theme Switcher
         self.assertIn('id="themeSelect"', html)
         self.assertIn('value="civic-eco"', html)
@@ -54,8 +58,10 @@ class TestUIBuilderAssets(unittest.TestCase):
         self.assertIn('id="deleteWidgetBtn"', html)
         self.assertIn('id="clearLayersBtn"', html)
 
-        # Check full widget library items (all 18 widgets)
+        # Check full widget library items (all 24 widgets including Navigation pack)
         required_widgets = [
+            "nav-turn-arrow", "nav-maneuver-banner", "nav-eta-badge", "nav-lane-assist",
+            "nav-camera-alert", "nav-hazard-alert",
             "shift-lights", "rev-strip", "smooth-arc", "dial-needle", "boost-gauge",
             "gauge-ticks", "digital-value", "lap-timer", "bar-slider", "temp-stack",
             "history-chart", "g-force-meter", "tpms-map", "battery-meter", "compass-dial",
@@ -68,6 +74,21 @@ class TestUIBuilderAssets(unittest.TestCase):
         self.assertIn("tabLvglBtn", html)
         self.assertIn("tabCppBtn", html)
         self.assertIn("tabJsonBtn", html)
+
+    def test_icon_packs_js_definitions(self):
+        icons_path = os.path.join(UI_BUILDER_DIR, "icon-packs.js")
+        with open(icons_path, "r", encoding="utf-8") as f:
+            js = f.read()
+
+        self.assertIn("navigation:", js)
+        self.assertIn("turn-right", js)
+        self.assertIn("turn-left", js)
+        self.assertIn("annunciators:", js)
+        self.assertIn("check-engine", js)
+        self.assertIn("oil-pressure", js)
+        self.assertIn("hazards:", js)
+        self.assertIn("speed-camera", js)
+        self.assertIn("police-radar", js)
 
     def test_style_css_font_faces_and_bezels(self):
         css_path = os.path.join(UI_BUILDER_DIR, "style.css")
@@ -153,28 +174,26 @@ class TestCodeGeneratorLogic(unittest.TestCase):
         }
         widgets = [
             {
+                "id": "nav_turn",
+                "type": "nav-turn-arrow",
+                "x": 227,
+                "y": 130,
+                "color": "#00ff66"
+            },
+            {
                 "id": "speed_val",
                 "type": "digital-value",
                 "x": 227,
-                "y": 184,
-                "fontSize": 96,
-                "fontFamily": "Segment7",
+                "y": 300,
+                "fontSize": 56,
+                "fontFamily": "Orbitron",
                 "color": "#ffffff",
-                "binding": "speed_kmh",
-                "showGhost": True
-            },
-            {
-                "id": "boost_gauge",
-                "type": "boost-gauge",
-                "x": 120,
-                "y": 120,
-                "radius": 60,
-                "binding": "boost_bar"
+                "binding": "speed_kmh"
             }
         ]
 
         payload = {
-            "schemaVersion": "2.1",
+            "schemaVersion": "2.2",
             "preset": preset,
             "widgets": widgets
         }
@@ -182,11 +201,10 @@ class TestCodeGeneratorLogic(unittest.TestCase):
         serialized = json.dumps(payload, indent=2)
         deserialized = json.loads(serialized)
 
-        self.assertEqual(deserialized["schemaVersion"], "2.1")
+        self.assertEqual(deserialized["schemaVersion"], "2.2")
         self.assertEqual(deserialized["preset"]["width"], 454)
         self.assertEqual(len(deserialized["widgets"]), 2)
-        self.assertEqual(deserialized["widgets"][0]["fontSize"], 96)
-        self.assertEqual(deserialized["widgets"][1]["type"], "boost-gauge")
+        self.assertEqual(deserialized["widgets"][0]["type"], "nav-turn-arrow")
 
 
 if __name__ == "__main__":

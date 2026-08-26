@@ -1,7 +1,7 @@
 /**
  * espDash UI Studio & Telemetry Builder Engine
  * 1-to-1 Pixel-Accurate ESP32 Display Simulator, Typography Studio & Visual Designer
- * Full 50Hz LVGL 8.4 Export Ready
+ * Navigation & Waze/GMaps Integration Pack + Full 50Hz LVGL 8.4 Export Ready
  */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -17,7 +17,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#0c1e18',
             bgCard: '#091618',
             text: '#ffffff',
-            textMuted: '#8a99ad'
+            textMuted: '#8a99ad',
+            navArrow: '#00ff66',
+            alert: '#ffcc00'
         },
         'type-r': {
             name: 'Type-R (Championship Red & Carbon)',
@@ -27,7 +29,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#220008',
             bgCard: '#140508',
             text: '#ffffff',
-            textMuted: '#94a3b8'
+            textMuted: '#94a3b8',
+            navArrow: '#ff0033',
+            alert: '#ff3366'
         },
         'cyberpunk': {
             name: 'Cyberpunk 2077 (Neon Pink & Cyan)',
@@ -37,7 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#180b28',
             bgCard: '#0e071c',
             text: '#ffffff',
-            textMuted: '#c084fc'
+            textMuted: '#c084fc',
+            navArrow: '#00f0ff',
+            alert: '#ff007f'
         },
         'motorsport-gt3': {
             name: 'Motorsport GT3 (Racing Yellow & Amber)',
@@ -47,7 +53,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#261c08',
             bgCard: '#161208',
             text: '#ffffff',
-            textMuted: '#a3a3a3'
+            textMuted: '#a3a3a3',
+            navArrow: '#ffcc00',
+            alert: '#ff6600'
         },
         'stealth-oled': {
             name: 'Stealth OLED (Pure Black & White)',
@@ -57,7 +65,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#141414',
             bgCard: '#0a0a0a',
             text: '#ffffff',
-            textMuted: '#71717a'
+            textMuted: '#71717a',
+            navArrow: '#ffffff',
+            alert: '#ffffff'
         },
         'ice-titanium': {
             name: 'Frozen Ice (Glacier Blue & Cold White)',
@@ -67,7 +77,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#0c1e33',
             bgCard: '#091626',
             text: '#f8fafc',
-            textMuted: '#94a3b8'
+            textMuted: '#94a3b8',
+            navArrow: '#38bdf8',
+            alert: '#f59e0b'
         },
         'synthwave': {
             name: 'Synthwave (Violet & Sunset Orange)',
@@ -77,7 +89,9 @@ document.addEventListener('DOMContentLoaded', () => {
             track: '#230c33',
             bgCard: '#140820',
             text: '#fdf4ff',
-            textMuted: '#d8b4fe'
+            textMuted: '#d8b4fe',
+            navArrow: '#ff7700',
+            alert: '#f43f5e'
         }
     };
 
@@ -168,7 +182,7 @@ document.addEventListener('DOMContentLoaded', () => {
         undoStack: [],
         redoStack: [],
         loadedCustomFonts: [],
-        activeExportTab: 'lvgl', // 'lvgl', 'cpp', 'json'
+        activeExportTab: 'lvgl',
         telemetry: {
             rpm: 5400,
             speed_kmh: 118,
@@ -191,6 +205,14 @@ document.addEventListener('DOMContentLoaded', () => {
             tpms_fr: 2.3,
             tpms_rl: 2.2,
             tpms_rr: 2.2,
+            nav_dist_m: 350,
+            nav_maneuver: 'turn-right', // 'turn-left', 'turn-right', 'slight-left', 'slight-right', 'sharp-left', 'sharp-right', 'roundabout', 'u-turn', 'straight'
+            nav_road: 'B700 Main Highway',
+            nav_eta: '18:42',
+            nav_rem_km: '14.2 km',
+            nav_rem_time: '18 min',
+            nav_speed_limit: 80,
+            nav_hazard_msg: '📸 Speed Camera 400m',
             link_status: 'ESP-NOW 50Hz'
         },
         chartHistory: {
@@ -307,6 +329,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 w.color = t.textMuted;
             } else if (w.type === 'status-badge') {
                 w.color = t.primary;
+            } else if (w.type === 'nav-turn-arrow' || w.type === 'nav-maneuver-banner') {
+                w.color = t.navArrow || t.primary;
+                w.bgColor = t.bgCard;
+            } else if (w.type === 'nav-hazard-alert' || w.type === 'nav-camera-alert') {
+                w.color = t.alert || '#ff3366';
+                w.bgColor = t.bgCard;
             }
         });
 
@@ -358,7 +386,6 @@ document.addEventListener('DOMContentLoaded', () => {
         renderCanvas();
     }
 
-    // Keyboard Shortcuts
     window.addEventListener('keydown', (e) => {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
 
@@ -412,7 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 8. EXACT 1-TO-1 REAL ESP SCREEN PRESETS
+    // 8. EXACT 1-TO-1 REAL ESP SCREEN PRESETS & NAVIGATION PRESETS
     // =========================================================================
     function loadPresetCivicAmoled() {
         const cx = 227;
@@ -432,6 +459,63 @@ document.addEventListener('DOMContentLoaded', () => {
             { id: 'rpm_num_label', type: 'text-label', x: cx + 26, y: 350, text: 'rpm', fontSize: 14, fontFamily: 'Montserrat, sans-serif', color: '#8a99ad', name: 'RPM Unit' },
             { id: 'status_label', type: 'text-label', x: cx, y: 390, text: 'Efficiency Monitor', fontSize: 16, fontFamily: 'Montserrat, sans-serif', color: '#00ff66', name: 'Status Footer' },
             { id: 'gear_badge', type: 'status-badge', x: cx, y: 80, text: 'D4', fontSize: 14, color: '#00f0ff', binding: 'gear', name: 'Gear Pill' }
+        ];
+        saveHistoryState();
+    }
+
+    // PRESET: Waze / GMaps Turn-by-Turn Navigation Cockpit (AMOLED 454x454)
+    function loadPresetNavAmoled() {
+        const cx = 227;
+        const cy = 227;
+
+        state.widgets = [
+            // Outer Speedometer & Tachometer Arcs
+            { id: 'nav_rpm_arc', type: 'smooth-arc', x: cx, y: cy, radius: 205, thickness: 8, startAngle: 140, endAngle: 400, color: '#00f0ff', trackColor: '#101726', min: 0, max: 8000, binding: 'rpm', name: 'Outer RPM Arc' },
+
+            // Big Navigation Turn Arrow (Center Top)
+            { id: 'nav_turn', type: 'nav-turn-arrow', x: cx, y: 130, w: 90, h: 90, color: '#00ff66', bgColor: '#0e172a', name: 'Turn Arrow' },
+
+            // Next Maneuver Road Banner
+            { id: 'nav_road_banner', type: 'nav-maneuver-banner', x: cx, y: 215, w: 320, h: 42, color: '#00f0ff', bgColor: '#0f172a', name: 'Next Road Banner' },
+
+            // Digital Speedometer (Center)
+            { id: 'nav_speed', type: 'digital-value', x: cx - 60, y: 300, fontSize: 56, fontFamily: 'Orbitron, monospace', color: '#ffffff', binding: 'speed_kmh', name: 'Speed Readout' },
+            { id: 'nav_speed_unit', type: 'text-label', x: cx - 60, y: 334, text: 'KM/H', fontSize: 11, fontFamily: 'Rajdhani, sans-serif', color: '#8a99ad', name: 'Speed Unit' },
+
+            // Speed Limit Sign
+            { id: 'nav_speed_limit', type: 'speed-sign', x: cx + 65, y: 300, text: '80', name: 'Speed Limit Sign' },
+
+            // Trip ETA & Remaining Distance Footer Badge
+            { id: 'nav_trip_eta', type: 'nav-eta-badge', x: cx, y: 380, w: 300, h: 40, color: '#00ff66', name: 'ETA & Trip Badge' },
+
+            // Top Camera / Hazard Alert Banner
+            { id: 'nav_camera_top', type: 'nav-camera-alert', x: cx, y: 55, w: 220, h: 32, color: '#ffcc00', name: 'Speed Trap Alert' }
+        ];
+        saveHistoryState();
+    }
+
+    // PRESET: Highway Navigation & Radar Bar (3.14" 800x240)
+    function loadPresetNavHighway314() {
+        state.widgets = [
+            // Left Container: Turn-by-turn Maneuver & Next Street
+            { id: 'nav_left_card', type: 'card-box', x: 12, y: 12, w: 280, h: 216, borderRadius: 12, color: '#00ff66', bgColor: '#0b1322', name: 'Maneuver Card' },
+            { id: 'nav_big_arrow', type: 'nav-turn-arrow', x: 80, y: 85, w: 90, h: 90, color: '#00ff66', name: 'Large Turn Arrow' },
+            { id: 'nav_dist_text', type: 'text-label', x: 200, y: 70, text: '350 m', fontSize: 28, fontFamily: 'Orbitron, monospace', color: '#ffffff', name: 'Turn Distance' },
+            { id: 'nav_turn_sub', type: 'text-label', x: 200, y: 102, text: 'Turn Right onto', fontSize: 11, fontFamily: 'Rajdhani, sans-serif', color: '#00ff66', name: 'Turn Instruction' },
+            { id: 'nav_street_name', type: 'text-label', x: 140, y: 160, text: 'B700 HIGHWAY EXIT 4B', fontSize: 13, fontFamily: 'Orbitron, monospace', color: '#00f0ff', name: 'Highway Exit' },
+            { id: 'nav_lane_guide', type: 'nav-lane-assist', x: 140, y: 195, w: 180, h: 20, name: 'Highway Lane Assist' },
+
+            // Center Container: Speed, Limit & Rev Strip
+            { id: 'nav_center_card', type: 'card-box', x: 304, y: 12, w: 250, h: 216, borderRadius: 12, color: '#00f0ff', bgColor: '#0b1322', name: 'Speed Cluster Card' },
+            { id: 'nav_rev_bar', type: 'rev-strip', x: 320, y: 30, w: 218, h: 12, ledCount: 16, max: 8000, color: '#00f0ff', trackColor: '#162238', binding: 'rpm', name: 'Tach Bar' },
+            { id: 'nav_center_spd', type: 'digital-value', x: 395, y: 110, fontSize: 64, fontFamily: 'Segment7, "DSEG7-Classic", monospace', color: '#ffffff', binding: 'speed_kmh', showGhost: true, ghostOpacity: 0.08, ghostDigits: '888', name: 'Center Speed' },
+            { id: 'nav_speed_sign_314', type: 'speed-sign', x: 495, y: 110, text: '90', name: 'Speed Limit 90' },
+            { id: 'nav_gear_pill', type: 'status-badge', x: 429, y: 185, text: 'D5', color: '#00f0ff', binding: 'gear', name: 'Gear Pill' },
+
+            // Right Container: Radar Hazard & Trip ETA
+            { id: 'nav_right_card', type: 'card-box', x: 566, y: 12, w: 222, h: 216, borderRadius: 12, color: '#ffcc00', bgColor: '#0b1322', name: 'Waze Radar Card' },
+            { id: 'nav_hazard_box', type: 'nav-hazard-alert', x: 677, y: 70, w: 198, h: 64, color: '#ffcc00', name: 'Waze Police Hazard' },
+            { id: 'nav_eta_box', type: 'nav-eta-badge', x: 677, y: 165, w: 198, h: 60, color: '#00ff66', name: 'Trip ETA Box' }
         ];
         saveHistoryState();
     }
@@ -530,7 +614,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 9. CANVAS RENDERING ENGINE
+    // 9. CANVAS RENDERING ENGINE & NAVIGATION GRAPHICS
     // =========================================================================
     function updateBezelFrameDimensions() {
         canvas.width = state.preset.width;
@@ -554,11 +638,9 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.save();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Canvas Background
         ctx.fillStyle = '#050811';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Snapping Grid
         if (state.gridSnap) {
             ctx.strokeStyle = '#0d1526';
             ctx.lineWidth = 1;
@@ -576,19 +658,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // Draw Widgets
         state.widgets.forEach(w => {
             ctx.save();
             renderWidget(w);
             ctx.restore();
         });
 
-        // Draw Selection Bounding Box
         if (state.selectedWidgetId) {
             const selW = state.widgets.find(w => w.id === state.selectedWidgetId);
-            if (selW) {
-                drawSelectionHighlight(selW);
-            }
+            if (selW) drawSelectionHighlight(selW);
         }
 
         ctx.restore();
@@ -606,6 +684,240 @@ document.addEventListener('DOMContentLoaded', () => {
         const val = getWidgetValue(w);
 
         switch (w.type) {
+            case 'nav-turn-arrow': {
+                const nw = w.w || 80;
+                const nh = w.h || 80;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+
+                // Rounded background box
+                ctx.fillStyle = w.bgColor || '#0f172a';
+                ctx.strokeStyle = w.color || '#00ff66';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.roundRect(-nw / 2, -nh / 2, nw, nh, 12);
+                ctx.fill();
+                ctx.stroke();
+
+                // Vector Turn Arrow
+                const mType = state.telemetry.nav_maneuver || 'turn-right';
+                ctx.strokeStyle = w.color || '#00ff66';
+                ctx.fillStyle = w.color || '#00ff66';
+                ctx.lineWidth = 6;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.shadowColor = w.color || '#00ff66';
+                ctx.shadowBlur = 8;
+
+                ctx.beginPath();
+                if (mType === 'turn-right') {
+                    ctx.moveTo(-16, 18);
+                    ctx.lineTo(-16, -4);
+                    ctx.arcTo(-16, -18, 0, -18, 16);
+                    ctx.lineTo(16, -18);
+                    ctx.stroke();
+                    // Arrowhead
+                    ctx.beginPath();
+                    ctx.moveTo(10, -26);
+                    ctx.lineTo(22, -18);
+                    ctx.lineTo(10, -10);
+                    ctx.fill();
+                } else if (mType === 'turn-left') {
+                    ctx.moveTo(16, 18);
+                    ctx.lineTo(16, -4);
+                    ctx.arcTo(16, -18, 0, -18, 16);
+                    ctx.lineTo(-16, -18);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(-10, -26);
+                    ctx.lineTo(-22, -18);
+                    ctx.lineTo(-10, -10);
+                    ctx.fill();
+                } else if (mType === 'slight-right') {
+                    ctx.moveTo(-12, 18);
+                    ctx.lineTo(14, -14);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(4, -20);
+                    ctx.lineTo(20, -18);
+                    ctx.lineTo(16, -2);
+                    ctx.fill();
+                } else if (mType === 'slight-left') {
+                    ctx.moveTo(12, 18);
+                    ctx.lineTo(-14, -14);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(-4, -20);
+                    ctx.lineTo(-20, -18);
+                    ctx.lineTo(-16, -2);
+                    ctx.fill();
+                } else if (mType === 'u-turn') {
+                    ctx.moveTo(14, 18);
+                    ctx.lineTo(14, -6);
+                    ctx.arcTo(14, -22, 0, -22, 14);
+                    ctx.arcTo(-14, -22, -14, -6, 14);
+                    ctx.lineTo(-14, 14);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(-20, 8);
+                    ctx.lineTo(-14, 20);
+                    ctx.lineTo(-8, 8);
+                    ctx.fill();
+                } else {
+                    // Straight Arrow
+                    ctx.moveTo(0, 18);
+                    ctx.lineTo(0, -16);
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(-8, -10);
+                    ctx.lineTo(0, -22);
+                    ctx.lineTo(8, -10);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+                break;
+            }
+
+            case 'nav-maneuver-banner': {
+                const bw = w.w || 300;
+                const bh = w.h || 44;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                ctx.fillStyle = w.bgColor || '#0f172a';
+                ctx.strokeStyle = w.color || '#00f0ff';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 8);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#00ff66';
+                ctx.font = '700 16px Orbitron, monospace';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`${state.telemetry.nav_dist_m} m`, -bw / 2 + 14, 0);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '600 13px Rajdhani, sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(state.telemetry.nav_road, bw / 2 - 14, 0);
+                ctx.restore();
+                break;
+            }
+
+            case 'nav-eta-badge': {
+                const ew = w.w || 280;
+                const eh = w.h || 40;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                ctx.fillStyle = '#0c1424';
+                ctx.strokeStyle = '#1e2d4a';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(-ew / 2, -eh / 2, ew, eh, 8);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#00ff66';
+                ctx.font = '700 13px "JetBrains Mono", monospace';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`ETA ${state.telemetry.nav_eta}`, -ew / 2 + 12, 0);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '600 12px "JetBrains Mono", monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(state.telemetry.nav_rem_time, 0, 0);
+
+                ctx.fillStyle = '#8a99ad';
+                ctx.font = '600 12px "JetBrains Mono", monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(state.telemetry.nav_rem_km, ew / 2 - 12, 0);
+                ctx.restore();
+                break;
+            }
+
+            case 'nav-lane-assist': {
+                const lw = w.w || 180;
+                const lh = w.h || 24;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                const lanes = [
+                    { dir: '↖', active: false },
+                    { dir: '↑', active: true },
+                    { dir: '↑', active: true },
+                    { dir: '↗', active: false }
+                ];
+                const laneW = lw / lanes.length;
+
+                lanes.forEach((l, i) => {
+                    const lx = -lw / 2 + i * laneW;
+                    ctx.fillStyle = l.active ? '#00ff66' : '#1e293b';
+                    ctx.strokeStyle = l.active ? '#00ff66' : '#334155';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.roundRect(lx + 2, -lh / 2, laneW - 4, lh, 4);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = l.active ? '#050811' : '#64748b';
+                    ctx.font = '700 13px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(l.dir, lx + laneW / 2, 0);
+                });
+                ctx.restore();
+                break;
+            }
+
+            case 'nav-camera-alert': {
+                const cw = w.w || 200;
+                const ch = w.h || 32;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                ctx.fillStyle = 'rgba(255, 204, 0, 0.15)';
+                ctx.strokeStyle = w.color || '#ffcc00';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.roundRect(-cw / 2, -ch / 2, cw, ch, 6);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#ffcc00';
+                ctx.font = '700 12px Rajdhani, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(state.telemetry.nav_hazard_msg, 0, 0);
+                ctx.restore();
+                break;
+            }
+
+            case 'nav-hazard-alert': {
+                const hw = w.w || 190;
+                const hh = w.h || 60;
+                ctx.save();
+                ctx.translate(w.x, w.y);
+                ctx.fillStyle = '#1c1014';
+                ctx.strokeStyle = '#ff3366';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.roundRect(-hw / 2, -hh / 2, hw, hh, 8);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#ff3366';
+                ctx.font = '700 14px Rajdhani, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('⚠️ POLICE RADAR', 0, -8);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '600 11px Inter, sans-serif';
+                ctx.fillText('Reported 400m ahead', 0, 14);
+                ctx.restore();
+                break;
+            }
+
             case 'shift-lights': {
                 const sRadius = w.radius || 110;
                 const sStartDeg = w.startAngle !== undefined ? w.startAngle : 210;
@@ -702,7 +1014,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const valA = startA + normVal * totalSweep;
 
-                // Track
                 ctx.beginPath();
                 ctx.arc(w.x, w.y, w.radius || 100, startA, endA, counterClockwise);
                 ctx.strokeStyle = w.trackColor || '#121829';
@@ -710,7 +1021,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.lineCap = 'round';
                 ctx.stroke();
 
-                // Active Arc
                 if (normVal > 0.001) {
                     ctx.beginPath();
                     ctx.arc(w.x, w.y, w.radius || 100, startA, valA, counterClockwise);
@@ -731,14 +1041,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const bNorm = Math.min(Math.max((val - minB) / (maxB - minB), 0), 1);
                 const bAngle = (135 + bNorm * 270) * Math.PI / 180;
 
-                // Gauge Scale Arc
                 ctx.beginPath();
                 ctx.arc(w.x, w.y, w.radius || 60, 135 * Math.PI / 180, 405 * Math.PI / 180);
                 ctx.strokeStyle = w.trackColor || '#141e30';
                 ctx.lineWidth = 8;
                 ctx.stroke();
 
-                // Active Boost Color (Cyan in Vacuum, Orange/Red in Boost)
                 const boostColor = val > 0 ? (w.color || '#ff6600') : '#00f0ff';
                 ctx.beginPath();
                 ctx.arc(w.x, w.y, w.radius || 60, 135 * Math.PI / 180, bAngle);
@@ -749,7 +1057,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.stroke();
                 ctx.shadowBlur = 0;
 
-                // Digital readout in center
                 ctx.fillStyle = '#ffffff';
                 ctx.font = '700 16px Orbitron, monospace';
                 ctx.textAlign = 'center';
@@ -779,107 +1086,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.shadowBlur = w.glow ? 10 : 0;
                 ctx.fillText(displayStr, w.x, w.y);
                 ctx.shadowBlur = 0;
-                break;
-            }
-
-            case 'lap-timer': {
-                ctx.fillStyle = '#0f172a';
-                ctx.strokeStyle = w.color || '#00ff66';
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                ctx.roundRect(w.x, w.y, w.w || 200, w.h || 60, 8);
-                ctx.fill();
-                ctx.stroke();
-
-                ctx.fillStyle = '#94a3b8';
-                ctx.font = '600 10px Rajdhani, sans-serif';
-                ctx.textAlign = 'left';
-                ctx.fillText('LAP TIME', w.x + 10, w.y + 16);
-
-                ctx.fillStyle = '#ffffff';
-                ctx.font = '700 18px "JetBrains Mono", monospace';
-                ctx.fillText(state.telemetry.lap_current, w.x + 10, w.y + 40);
-
-                ctx.fillStyle = state.telemetry.lap_delta.startsWith('-') ? '#00ff66' : '#ff3366';
-                ctx.font = '700 14px "JetBrains Mono", monospace';
-                ctx.textAlign = 'right';
-                ctx.fillText(`Δ ${state.telemetry.lap_delta}`, w.x + (w.w || 200) - 10, w.y + 40);
-                break;
-            }
-
-            case 'temp-stack': {
-                const tw = w.w || 90;
-                const th = w.h || 120;
-
-                // Oil Temp Bar
-                const oilNorm = Math.min(Math.max((state.telemetry.oil_temp - 40) / 110, 0), 1);
-                ctx.fillStyle = w.bgColor || '#141e30';
-                ctx.fillRect(w.x, w.y, 16, th);
-                ctx.fillStyle = '#ff6600';
-                ctx.fillRect(w.x, w.y + th * (1 - oilNorm), 16, th * oilNorm);
-
-                // Water Temp Bar
-                const waterNorm = Math.min(Math.max((state.telemetry.water_temp - 40) / 90, 0), 1);
-                ctx.fillStyle = w.bgColor || '#141e30';
-                ctx.fillRect(w.x + 24, w.y, 16, th);
-                ctx.fillStyle = '#00f0ff';
-                ctx.fillRect(w.x + 24, w.y + th * (1 - waterNorm), 16, th * waterNorm);
-
-                ctx.fillStyle = '#ffffff';
-                ctx.font = '600 10px Rajdhani, sans-serif';
-                ctx.textAlign = 'left';
-                ctx.fillText(`OIL: ${state.telemetry.oil_temp}°C`, w.x + 48, w.y + 30);
-                ctx.fillText(`H2O: ${state.telemetry.water_temp}°C`, w.x + 48, w.y + 60);
-                break;
-            }
-
-            case 'battery-meter': {
-                const bw = w.w || 120;
-                const bh = w.h || 40;
-                ctx.fillStyle = w.bgColor || '#0e1526';
-                ctx.strokeStyle = w.color || '#00f0ff';
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                ctx.roundRect(w.x, w.y, bw, bh, 6);
-                ctx.fill();
-                ctx.stroke();
-
-                ctx.fillStyle = '#00f0ff';
-                ctx.font = '700 16px "JetBrains Mono", monospace';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(`🔋 ${state.telemetry.battery_v}V`, w.x + bw / 2, w.y + bh / 2);
-                break;
-            }
-
-            case 'compass-dial': {
-                const cr = w.radius || 40;
-                ctx.save();
-                ctx.translate(w.x, w.y);
-                ctx.beginPath();
-                ctx.arc(0, 0, cr, 0, Math.PI * 2);
-                ctx.strokeStyle = w.color || '#00f0ff';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-
-                ctx.fillStyle = '#ffffff';
-                ctx.font = '700 12px Rajdhani, sans-serif';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText('N', 0, -cr + 12);
-                ctx.fillText('S', 0, cr - 12);
-                ctx.fillText('W', -cr + 12, 0);
-                ctx.fillText('E', cr - 12, 0);
-
-                // Heading arrow
-                ctx.rotate((state.telemetry.heading_deg || 0) * Math.PI / 180);
-                ctx.beginPath();
-                ctx.moveTo(0, -cr + 16);
-                ctx.lineTo(6, 0);
-                ctx.lineTo(-6, 0);
-                ctx.fillStyle = '#ff0055';
-                ctx.fill();
-                ctx.restore();
                 break;
             }
 
@@ -1169,12 +1375,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 10. INSPECTOR PANEL (WITH PROMINENT DELETE BUTTON)
+    // 10. INSPECTOR PANEL (WITH DELETE & NAVIGATION CONTROLS)
     // =========================================================================
     function renderInspector() {
         if (!state.selectedWidgetId) {
             inspectorTitle.textContent = 'Widget Inspector';
-            inspectorContent.innerHTML = '<p class="no-selection-msg">Select a widget on the canvas to configure properties & typography</p>';
+            inspectorContent.innerHTML = '<p class="no-selection-msg">Select a widget on the canvas to configure properties, navigation & typography</p>';
             return;
         }
 
@@ -1194,7 +1400,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <input type="text" class="styled-input" id="propName" value="${w.name || w.id}">
             </div>
             <div class="prop-input-group">
-                <label>Telemetry Binding</label>
+                <label>Telemetry / GPS Binding</label>
                 <select class="styled-select" id="propBinding">
                     <option value="" ${!w.binding ? 'selected' : ''}>(None / Static)</option>
                     <option value="rpm" ${w.binding === 'rpm' ? 'selected' : ''}>Engine RPM (0-8000)</option>
@@ -1348,7 +1554,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         html += `</div>`;
 
-        // SECTION 5: PROMINENT DELETE BUTTON
+        // SECTION 5: DELETE BUTTON
         html += `
         <button id="inspectorDeleteBtn" class="btn-delete-widget">
             🗑️ Delete Selected Widget [Del]
@@ -1397,9 +1603,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
-        document.getElementById('inspectorDeleteBtn')?.addEventListener('click', () => {
-            deleteSelectedWidget();
-        });
+        document.getElementById('inspectorDeleteBtn')?.addEventListener('click', deleteSelectedWidget);
     }
 
     // =========================================================================
@@ -1466,9 +1670,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // =========================================================================
-    // 12. ALIGNMENT & CANVAS INTERACTION TOOLS
-    // =========================================================================
+    // Alignment
     function alignSelected(direction) {
         if (!state.selectedWidgetId) return;
         const w = state.widgets.find(item => item.id === state.selectedWidgetId);
@@ -1512,7 +1714,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('duplicateWidgetBtn')?.addEventListener('click', duplicateSelectedWidget);
     document.getElementById('deleteWidgetBtn')?.addEventListener('click', deleteSelectedWidget);
 
-    // Layer Reordering
     document.getElementById('layerUpBtn')?.addEventListener('click', () => {
         if (!state.selectedWidgetId) return;
         const idx = state.widgets.findIndex(w => w.id === state.selectedWidgetId);
@@ -1538,7 +1739,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // =========================================================================
-    // 13. CANVAS MOUSE & DRAG INTERACTION
+    // 12. CANVAS DRAG AND DROP
     // =========================================================================
     canvas.addEventListener('mousedown', (e) => {
         const rect = canvas.getBoundingClientRect();
@@ -1553,8 +1754,8 @@ document.addEventListener('DOMContentLoaded', () => {
             let bx = w.x, by = w.y, bw = 50, bh = 50;
 
             if (w.w && w.h) {
-                bx = w.x;
-                by = w.y;
+                bx = w.x - (w.w / 2);
+                by = w.y - (w.h / 2);
                 bw = w.w;
                 bh = w.h;
             } else if (w.radius) {
@@ -1623,7 +1824,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Palette Drag & Drop
     document.querySelectorAll('.widget-item').forEach(item => {
         item.addEventListener('dragstart', (e) => {
             e.dataTransfer.setData('text/plain', item.getAttribute('data-type'));
@@ -1663,6 +1863,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const t = THEMES[state.currentThemeKey] || THEMES['civic-eco'];
 
         switch (type) {
+            case 'nav-turn-arrow':
+                return { id, type, name: 'Turn Arrow', x, y, w: 80, h: 80, color: t.navArrow || t.primary, bgColor: t.bgCard };
+            case 'nav-maneuver-banner':
+                return { id, type, name: 'Next Road Banner', x, y, w: 260, h: 42, color: t.secondary, bgColor: t.bgCard };
+            case 'nav-eta-badge':
+                return { id, type, name: 'ETA Badge', x, y, w: 240, h: 36, color: t.primary };
+            case 'nav-lane-assist':
+                return { id, type, name: 'Lane Guidance', x, y, w: 160, h: 24 };
+            case 'nav-camera-alert':
+                return { id, type, name: 'Speed Camera', x, y, w: 180, h: 30, color: t.alert || '#ffcc00' };
+            case 'nav-hazard-alert':
+                return { id, type, name: 'Hazard Alert', x, y, w: 180, h: 56, color: '#ff3366' };
             case 'shift-lights':
                 return { id, type, name: 'Shift Light Arch', x, y, radius: 90, ledRadius: 4, ledCount: 12, startAngle: 210, endAngle: 330, max: 7000, color: t.primary, trackColor: t.track, binding: 'rpm' };
             case 'rev-strip':
@@ -1709,7 +1921,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 14. 50HZ TELEMETRY SIMULATOR
+    // 13. TELEMETRY & GPS SIMULATOR
     // =========================================================================
     const simBindings = [
         { id: 'simRpm', valId: 'valRpm', key: 'rpm' },
@@ -1717,10 +1929,9 @@ document.addEventListener('DOMContentLoaded', () => {
         { id: 'simGear', valId: 'valGear', key: 'gear' },
         { id: 'simThrottle', valId: 'valThrottle', key: 'throttle' },
         { id: 'simBrake', valId: 'valBrake', key: 'brake' },
+        { id: 'simNavDist', valId: 'valNavDist', key: 'nav_dist_m' },
         { id: 'simBoost', valId: 'valBoost', key: 'boost_bar', parser: v => (v / 10).toFixed(1) },
-        { id: 'simFuel', valId: 'valFuel', key: 'fuel_pct' },
         { id: 'simWater', valId: 'valWater', key: 'water_temp' },
-        { id: 'simOil', valId: 'valOil', key: 'oil_temp' },
         { id: 'simBatt', valId: 'valBatt', key: 'battery_v', parser: v => (v / 10).toFixed(1) },
         { id: 'simLatG', valId: 'valLatG', key: 'lat_g', parser: v => (v / 100).toFixed(2) }
     ];
@@ -1737,6 +1948,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (valLabel) valLabel.textContent = formatted;
             renderCanvas();
         });
+    });
+
+    document.getElementById('simNavManeuver')?.addEventListener('change', (e) => {
+        state.telemetry.nav_maneuver = e.target.value;
+        renderCanvas();
     });
 
     const sweepBtn = document.getElementById('simPlayPauseBtn');
@@ -1760,20 +1976,19 @@ document.addEventListener('DOMContentLoaded', () => {
                     state.telemetry.brake = Math.round(Math.max(0, -Math.sin(phase * 1.2) * 80));
                     state.telemetry.boost_bar = parseFloat((Math.sin(phase * 1.2) * 1.4).toFixed(1));
                     state.telemetry.water_temp = Math.round(92 + Math.sin(phase * 0.1) * 6);
-                    state.telemetry.oil_temp = Math.round(98 + Math.sin(phase * 0.1) * 8);
                     state.telemetry.lat_g = parseFloat((Math.sin(phase * 0.9) * 1.1).toFixed(2));
                     state.telemetry.heading_deg = (state.telemetry.heading_deg + 1) % 360;
+                    state.telemetry.nav_dist_m = Math.max(10, Math.round(600 - ((phase * 80) % 600)));
                     state.telemetry.gear = 1 + (Math.floor(phase * 0.6) % 6);
 
-                    // Update UI Labels
                     document.getElementById('valRpm').textContent = state.telemetry.rpm;
                     document.getElementById('valSpeed').textContent = state.telemetry.speed_kmh;
                     document.getElementById('valGear').textContent = state.telemetry.gear;
                     document.getElementById('valThrottle').textContent = state.telemetry.throttle;
                     document.getElementById('valBrake').textContent = state.telemetry.brake;
+                    document.getElementById('valNavDist').textContent = state.telemetry.nav_dist_m;
                     document.getElementById('valBoost').textContent = state.telemetry.boost_bar;
                     document.getElementById('valWater').textContent = state.telemetry.water_temp;
-                    document.getElementById('valOil').textContent = state.telemetry.oil_temp;
                     document.getElementById('valLatG').textContent = state.telemetry.lat_g;
 
                     state.chartHistory.rpm.shift();
@@ -1793,7 +2008,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // 15. PRESETS & DROPDOWNS
+    // 14. PRESETS DROPDOWN
     // =========================================================================
     if (presetSelect) {
         presetSelect.addEventListener('change', (e) => {
@@ -1831,6 +2046,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     state.preset = DEVICE_PRESETS['amoled-454'];
                     updateBezelFrameDimensions();
                     loadPresetCivicAmoled();
+                } else if (layoutKey === 'nav-amoled') {
+                    presetSelect.value = 'amoled-454';
+                    state.currentPresetKey = 'amoled-454';
+                    state.preset = DEVICE_PRESETS['amoled-454'];
+                    updateBezelFrameDimensions();
+                    loadPresetNavAmoled();
+                } else if (layoutKey === 'nav-highway-314') {
+                    presetSelect.value = 'esp32-s3-lcd-314';
+                    state.currentPresetKey = 'esp32-s3-lcd-314';
+                    state.preset = DEVICE_PRESETS['esp32-s3-lcd-314'];
+                    updateBezelFrameDimensions();
+                    loadPresetNavHighway314();
                 } else if (layoutKey === 'xiao-production') {
                     presetSelect.value = 'xiao-round-240';
                     state.currentPresetKey = 'xiao-round-240';
@@ -1867,7 +2094,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Grid & Bezel
     document.getElementById('gridToggleBtn')?.addEventListener('click', (e) => {
         state.gridSnap = !state.gridSnap;
         e.target.textContent = state.gridSnap ? 'Grid: 8px' : 'Grid: OFF';
@@ -1883,7 +2109,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // =========================================================================
-    // 16. MODAL CODE EXPORT (LVGL 8.4 / TFT_eSPI / JSON)
+    // 15. MODAL CODE EXPORT (LVGL 8.4 / TFT_eSPI / JSON)
     // =========================================================================
     const exportBtn = document.getElementById('exportCodeBtn');
     const tabLvglBtn = document.getElementById('tabLvglBtn');
@@ -1987,7 +2213,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // =========================================================================
-    // 17. INITIAL STARTUP
+    // 16. INITIAL STARTUP
     // =========================================================================
     updateBezelFrameDimensions();
     loadPresetCivicAmoled();
