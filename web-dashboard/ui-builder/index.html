@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>espDash - ESP32 Screen 1-to-1 UI Builder (Experimental Preview)</title>
+    <title>espDash - ESP32 Screen 1-to-1 UI Studio & Telemetry Builder</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Chakra+Petch:ital,wght@0,400;0,600;0,700;1,700&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700;800&family=Montserrat:wght@400;500;600;700;800;900&family=Orbitron:wght@500;600;700;800;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="app-container">
@@ -15,42 +15,61 @@
         <header class="top-nav">
             <div class="brand">
                 <span class="logo-icon">🏎️</span>
-                <span class="brand-title">espDash <span class="badge" style="background: rgba(255,204,0,0.2); border-color: #ffcc00; color: #ffcc00;">EXPERIMENTAL PREVIEW</span></span>
+                <div class="brand-text">
+                    <span class="brand-title">espDash <span class="badge badge-pro">STUDIO</span></span>
+                    <span class="brand-sub">ESP32 1-to-1 Pixel Dashboard Builder</span>
+                </div>
             </div>
             
             <div class="preset-selector-group">
-                <label for="devicePresetSelect">Target Display:</label>
+                <label for="devicePresetSelect">Display:</label>
                 <select id="devicePresetSelect" class="styled-select">
                     <optgroup label="Round Displays">
-                        <option value="xiao-round-240" selected>Seeed XIAO ESP32-S3 Round (240x240 Circle)</option>
-                        <option value="amoled-466">Waveshare 1.32" AMOLED (466x466 Circle)</option>
+                        <option value="amoled-454" selected>Waveshare 1.43" AMOLED (454x454 Circle)</option>
+                        <option value="xiao-round-240">Seeed XIAO ESP32-S3 Round (240x240 Circle)</option>
+                        <option value="xiao-dual-round">Seeed XIAO Dual Round (480x240 Twin Pod)</option>
                     </optgroup>
-                    <optgroup label="ESP32 LCD Boards">
-                        <option value="esp32-s3-lcd-314">ESP32-S3-LCD-3.14 (480x272 Rect)</option>
+                    <optgroup label="Wide / Rectangular Displays">
+                        <option value="esp32-s3-lcd-314">ESP32-S3-LCD-3.14 (800x240 Rect Bar)</option>
                         <option value="waveshare-316">Waveshare 3.16" LCD (320x240 Rect)</option>
                         <option value="waveshare-147">Waveshare 1.47" LCD (172x320 Portrait)</option>
                     </optgroup>
-                    <optgroup label="OLED & Custom">
-                        <option value="oled-128x64">Generic OLED (128x64 Mono)</option>
+                    <optgroup label="Monochrome & OLED">
+                        <option value="oled-128x64">Generic OLED Mono (128x64)</option>
                     </optgroup>
                 </select>
-                <button id="resetLayoutBtn" class="btn-sm btn-secondary" title="Load Production Device Layout">🔄 Production Layout</button>
+
+                <div class="dropdown-menu-wrapper">
+                    <button id="presetsMenuBtn" class="btn-sm btn-secondary">📐 Load Layout ▾</button>
+                    <div id="presetsDropdown" class="dropdown-popover hidden">
+                        <div class="dropdown-item" data-preset-layout="civic-amoled">🏎️ Civic 9G Eco Coach (AMOLED 454)</div>
+                        <div class="dropdown-item" data-preset-layout="xiao-production">⭕ XIAO GC9A01 Gauge (240x240)</div>
+                        <div class="dropdown-item" data-preset-layout="xiao-eez">📱 XIAO EEZ Studio Screen 1 (240x240)</div>
+                        <div class="dropdown-item" data-preset-layout="racelab-314">📊 RaceLab Bar & TPMS (800x240)</div>
+                        <div class="dropdown-item" data-preset-layout="dual-cockpit">🧭 Dual Round Pod Cockpit (480x240)</div>
+                        <div class="dropdown-item" data-preset-layout="cyberpunk-hud">⚡ Cyberpunk Neon Hypercar HUD</div>
+                        <div class="dropdown-divider"></div>
+                        <div class="dropdown-item" data-preset-layout="blank">📄 Clear Canvas (Blank)</div>
+                    </div>
+                </div>
             </div>
 
             <div class="canvas-controls">
                 <div class="zoom-group">
-                    <button id="zoomOutBtn" class="btn-sm">-</button>
+                    <button id="zoomOutBtn" class="btn-sm" title="Zoom Out">-</button>
                     <span id="zoomLabel">100%</span>
-                    <button id="zoomInBtn" class="btn-sm">+</button>
+                    <button id="zoomInBtn" class="btn-sm" title="Zoom In">+</button>
                 </div>
-                <button id="gridToggleBtn" class="btn-sm active" title="Toggle Grid Snapping">Grid: ON</button>
-                <button id="bezelToggleBtn" class="btn-sm active" title="Toggle Bezel Simulation">Bezel: ON</button>
+                <button id="gridToggleBtn" class="btn-sm active" title="Toggle Grid Snapping">Grid: 8px</button>
+                <button id="bezelToggleBtn" class="btn-sm active" title="Toggle Physical Bezel Simulation">Bezel: ON</button>
+                <button id="uploadFontBtn" class="btn-sm btn-font" title="Upload Custom TTF/WOFF/OTF font file">🔤 Add Font</button>
+                <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" style="display: none;">
             </div>
 
             <div class="action-buttons">
-                <button id="exportCodeBtn" class="btn btn-primary">⚡ Export C++ Code</button>
-                <button id="exportJsonBtn" class="btn btn-secondary">💾 Save Layout</button>
-                <button id="importJsonBtn" class="btn btn-secondary">📂 Load Layout</button>
+                <button id="exportCodeBtn" class="btn btn-primary">⚡ Export C++ / LVGL</button>
+                <button id="exportJsonBtn" class="btn btn-secondary" title="Save JSON File">💾 Save</button>
+                <button id="importJsonBtn" class="btn btn-secondary" title="Open JSON File">📂 Open</button>
                 <input type="file" id="fileInput" accept=".json" style="display: none;">
             </div>
         </header>
@@ -61,68 +80,108 @@
             <aside class="sidebar left-palette">
                 <div class="panel-header">
                     <h3>Widgets Library</h3>
+                    <span class="count-badge" id="widgetCountBadge">13 widgets</span>
                 </div>
                 <div class="widget-list">
-                    <div class="widget-item" data-type="shift-lights">
+                    <div class="widget-item" data-type="shift-lights" draggable="true">
                         <span class="widget-icon">🚥</span>
                         <div class="widget-info">
                             <span class="widget-title">Shift Lights</span>
-                            <span class="widget-desc">LED tachometer arch</span>
+                            <span class="widget-desc">Progressive curved LED arch</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="smooth-arc">
+                    <div class="widget-item" data-type="smooth-arc" draggable="true">
                         <span class="widget-icon">⭕</span>
                         <div class="widget-info">
-                            <span class="widget-title">Smooth Arc</span>
-                            <span class="widget-desc">AA gauge arc slider</span>
+                            <span class="widget-title">Smooth Glow Arc</span>
+                            <span class="widget-desc">Anti-aliased gradient arc</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="digital-value">
+                    <div class="widget-item" data-type="digital-value" draggable="true">
                         <span class="widget-icon">🔢</span>
                         <div class="widget-info">
-                            <span class="widget-title">Digital Readout</span>
-                            <span class="widget-desc">Formatted telemetry text</span>
+                            <span class="widget-title">7-Segment / Digit</span>
+                            <span class="widget-desc">Ghost backdrop & telemetry</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="dial-needle">
+                    <div class="widget-item" data-type="dial-needle" draggable="true">
                         <span class="widget-icon">🧭</span>
                         <div class="widget-info">
                             <span class="widget-title">Dial Needle</span>
-                            <span class="widget-desc">Analog gauge needle</span>
+                            <span class="widget-desc">Analog needle with center hub</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="bar-slider">
+                    <div class="widget-item" data-type="gauge-ticks" draggable="true">
+                        <span class="widget-icon">📏</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Gauge Ticks</span>
+                            <span class="widget-desc">Radial dial ticks & scale numbers</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="bar-slider" draggable="true">
                         <span class="widget-icon">📊</span>
                         <div class="widget-info">
-                            <span class="widget-title">Bar Slider</span>
-                            <span class="widget-desc">Linear progress bar</span>
+                            <span class="widget-title">Telemetry Bar</span>
+                            <span class="widget-desc">Linear progress bar slider</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="status-badge">
+                    <div class="widget-item" data-type="history-chart" draggable="true">
+                        <span class="widget-icon">📈</span>
+                        <div class="widget-info">
+                            <span class="widget-title">History Waveform</span>
+                            <span class="widget-desc">Live CAN telemetry trace graph</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="g-force-meter" draggable="true">
+                        <span class="widget-icon">🎯</span>
+                        <div class="widget-info">
+                            <span class="widget-title">G-Force Radar</span>
+                            <span class="widget-desc">Polar friction circle & trail</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="tpms-map" draggable="true">
+                        <span class="widget-icon">🏎️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">TPMS Chassis Map</span>
+                            <span class="widget-desc">4-wheel pressure/temp grid</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="annunciator-icon" draggable="true">
                         <span class="widget-icon">🚨</span>
                         <div class="widget-info">
-                            <span class="widget-title">Status Light</span>
-                            <span class="widget-desc">Alert flag badge</span>
+                            <span class="widget-title">Warning Annunciator</span>
+                            <span class="widget-desc">Check engine, oil, ABS, battery</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="text-label">
+                    <div class="widget-item" data-type="status-badge" draggable="true">
+                        <span class="widget-icon">🏷️</span>
+                        <div class="widget-info">
+                            <span class="widget-title">Status Badge</span>
+                            <span class="widget-desc">Gear, link or alert pill</span>
+                        </div>
+                    </div>
+                    <div class="widget-item" data-type="text-label" draggable="true">
                         <span class="widget-icon">🔤</span>
                         <div class="widget-info">
                             <span class="widget-title">Text Label</span>
-                            <span class="widget-desc">Static label header</span>
+                            <span class="widget-desc">Custom typography header</span>
                         </div>
                     </div>
-                    <div class="widget-item" data-type="card-box">
+                    <div class="widget-item" data-type="card-box" draggable="true">
                         <span class="widget-icon">🔲</span>
                         <div class="widget-info">
-                            <span class="widget-title">Card Panel</span>
-                            <span class="widget-desc">Background container</span>
+                            <span class="widget-title">Glass Card Panel</span>
+                            <span class="widget-desc">Frosted container background</span>
                         </div>
                     </div>
                 </div>
 
-                <div class="panel-header">
+                <div class="panel-header" style="margin-top: 12px;">
                     <h3>Layers</h3>
+                    <div class="layer-actions">
+                        <button id="layerUpBtn" class="btn-icon" title="Move Layer Up">▲</button>
+                        <button id="layerDownBtn" class="btn-icon" title="Move Layer Down">▼</button>
+                    </div>
                 </div>
                 <div id="layersList" class="layers-list">
                     <!-- Dynamic Layer items populated here -->
@@ -131,15 +190,31 @@
 
             <!-- CENTER CANVAS VIEWPORT -->
             <section class="viewport-area">
+                <!-- Alignment quick bar -->
+                <div class="canvas-align-toolbar">
+                    <span class="toolbar-title">Align:</span>
+                    <button class="btn-icon" id="alignLeftBtn" title="Align Left">⫷</button>
+                    <button class="btn-icon" id="alignCenterHBtn" title="Center Horizontally">⧫</button>
+                    <button class="btn-icon" id="alignRightBtn" title="Align Right">⫸</button>
+                    <span class="toolbar-divider"></span>
+                    <button class="btn-icon" id="alignTopBtn" title="Align Top">⫯</button>
+                    <button class="btn-icon" id="alignCenterVBtn" title="Center Vertically">⧰</button>
+                    <button class="btn-icon" id="alignBottomBtn" title="Align Bottom">⫰</button>
+                    <span class="toolbar-divider"></span>
+                    <button class="btn-icon" id="duplicateWidgetBtn" title="Duplicate Selected (Ctrl+D)">⧉</button>
+                    <button class="btn-icon" id="deleteWidgetBtn" title="Delete Selected (Del)">🗑️</button>
+                </div>
+
                 <div class="viewport-wrapper" id="viewportWrapper">
                     <div class="bezel-frame round-display" id="bezelFrame">
-                        <canvas id="displayCanvas" width="240" height="240"></canvas>
+                        <canvas id="displayCanvas" width="454" height="454"></canvas>
                         <div class="canvas-overlay-nodes" id="canvasOverlay"></div>
                     </div>
                 </div>
                 <div class="viewport-info-bar">
-                    <span id="canvasDimInfo">Resolution: 240 × 240 (ROUND RGB565)</span>
+                    <span id="canvasDimInfo">Resolution: 454 × 454 (ROUND AMOLED QSPI)</span>
                     <span id="cursorPosInfo">X: 0, Y: 0</span>
+                    <span id="activeFontInfo">Loaded Fonts: 9 families</span>
                     <span id="fpsInfo">Simulation: 50 FPS</span>
                 </div>
             </section>
@@ -150,7 +225,7 @@
                     <h3 id="inspectorTitle">Widget Inspector</h3>
                 </div>
                 <div id="inspectorContent" class="inspector-content">
-                    <p class="no-selection-msg">Select a widget on the canvas to configure properties</p>
+                    <p class="no-selection-msg">Select a widget on the canvas to configure properties & typography</p>
                 </div>
             </aside>
         </main>
@@ -159,8 +234,14 @@
         <footer class="bottom-bar">
             <div class="telemetry-sim-panel">
                 <div class="sim-header">
-                    <span class="sim-title">🏎️ Telemetry Simulator</span>
-                    <button id="simPlayPauseBtn" class="btn-sm btn-accent">▶ Sweep Test</button>
+                    <div class="sim-title-group">
+                        <span class="sim-title">🏎️ Telemetry Simulator</span>
+                        <span class="sim-mode-badge" id="simModeBadge">MANUAL</span>
+                    </div>
+                    <div class="sim-btn-group">
+                        <button id="simPlayPauseBtn" class="btn-sm btn-accent">▶ Sweep Test</button>
+                        <button id="simLapSimBtn" class="btn-sm btn-secondary">🏁 Track Lap Sim</button>
+                    </div>
                 </div>
                 <div class="sim-sliders-row">
                     <div class="sim-field">
@@ -191,6 +272,14 @@
                         <label>Water Temp <span id="valWater">92</span>°C</label>
                         <input type="range" id="simWater" min="40" max="130" value="92">
                     </div>
+                    <div class="sim-field">
+                        <label>Battery <span id="valBatt">13.8</span>V</label>
+                        <input type="range" id="simBatt" min="100" max="155" value="138">
+                    </div>
+                    <div class="sim-field">
+                        <label>Lateral G <span id="valLatG">0.45</span>g</label>
+                        <input type="range" id="simLatG" min="-150" max="150" value="45">
+                    </div>
                 </div>
             </div>
 
@@ -200,7 +289,7 @@
                     <span id="bridgeStatusBadge" class="status-badge disconnected">Disconnected</span>
                 </div>
                 <div class="bridge-controls">
-                    <input type="text" id="bridgeTargetIp" class="styled-input" value="esp32-gauge-round.local" placeholder="Target Host / IP">
+                    <input type="text" id="bridgeTargetIp" class="styled-input" value="esp32-display.local" placeholder="Target Host / IP">
                     <button id="connectWsBtn" class="btn-sm btn-primary">WebSocket Connect</button>
                     <button id="connectSerialBtn" class="btn-sm btn-secondary">USB WebSerial</button>
                 </div>
@@ -212,11 +301,15 @@
     <div id="codeModal" class="modal-backdrop">
         <div class="modal-card">
             <div class="modal-header">
-                <h3>⚡ Generated C++ TFT_eSPI Firmware Code</h3>
+                <div class="modal-title-tabs">
+                    <button class="modal-tab-btn active" id="tabCppBtn">⚡ TFT_eSPI C++ (Sprites)</button>
+                    <button class="modal-tab-btn" id="tabLvglBtn">📱 LVGL 8.3 C Code (screens.c)</button>
+                    <button class="modal-tab-btn" id="tabJsonBtn">💾 JSON Layout</button>
+                </div>
                 <button id="closeModalBtn" class="close-btn">&times;</button>
             </div>
             <div class="modal-body">
-                <p>Copy and paste this production double-buffered rendering code directly into your ESP32 display node firmware:</p>
+                <p id="modalSnippetDesc">Copy and paste this production double-buffered rendering code directly into your ESP32 display node firmware:</p>
                 <pre><code id="codeSnippet" class="code-block"></code></pre>
             </div>
             <div class="modal-footer">
