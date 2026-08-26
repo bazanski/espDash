@@ -1,5 +1,13 @@
 # 📡 ArduinoOTA Wireless Firmware Deployment Guide
 
+> **Gateway OTA is disabled by default (2026-08-10).** The Central Gateway's Wi-Fi station degraded
+> its own ESP-NOW link to the display nodes on-car, so it now boots with Wi-Fi off entirely
+> (`ESPDASH_GATEWAY_WIFI=0` in `firmware/esp32-gateway/platformio.ini`) — USB + ESP-NOW only. The code
+> below is preserved and still works, but only after building the gateway with
+> `-DESPDASH_GATEWAY_WIFI=1` and reflashing it over USB first. See `docs/ARCHITECTURE.md` §5.2.
+> **Display nodes are unaffected** — the round gauge and future nodes still have Wi-Fi/OTA enabled by
+> default, as covered below.
+
 All nodes in **espDash** feature background **ArduinoOTA / WebOTA** so firmware can be flashed wirelessly over any configured Wi-Fi network (`Complex_parking`, `Bazanski_ph`, `Bazanski_IS`, or `IOT-monday`) without disassembling dashboard trims or unplugging USB cables.
 
 ---
@@ -31,7 +39,7 @@ All nodes in **espDash** feature background **ArduinoOTA / WebOTA** so firmware 
 
 ## ⚡ Flashing Firmware Over-The-Air (OTA)
 
-### 1. Flash Central Gateway Wirelessly:
+### 1. Flash Central Gateway Wirelessly (requires `-DESPDASH_GATEWAY_WIFI=1`, see note above):
 ```bash
 ~/.platformio/penv/bin/pio run -t upload --upload-port esp32-gateway.local -d firmware/esp32-gateway
 ```

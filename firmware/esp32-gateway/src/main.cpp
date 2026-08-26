@@ -7,8 +7,9 @@
 // CONCURRENCY
 //   core 1  canRxTask   (prio 10) - twai_receive + decode + ring_push. No I/O.
 //   core 1  publishTask (prio 5)  - ALL output: raw drain, JSON, ESP-NOW, and
-//                                   every WebSocket/telnet/Serial call.
-//   core 1  loopTask    (prio 1)  - ArduinoOTA + Wi-Fi maintenance only.
+//                                   Serial (+ WebSocket/telnet when enabled).
+//   core 1  loopTask    (prio 1)  - Wi-Fi/OTA maintenance when enabled, else
+//                                   just TWAI recovery checks.
 //   core 0                        - left to the Wi-Fi/lwIP and TinyUSB tasks.
 //
 // Priority, not core affinity, is what protects CAN reception here: canRxTask
@@ -20,19 +21,33 @@
 // lost frames. The ring buffer decouples the two; overflow now drops the
 // oldest frame and increments a counter reported as "dropped" in the JSON.
 //
-// The WebSockets library is NOT thread-safe: webSocket.loop() and
-// broadcastTXT() must both stay inside publishTask.
+// WIRELESS: gated behind ESPDASH_GATEWAY_WIFI (platformio.ini), OFF by
+// default. An on-car test showed the gateway's own Wi-Fi station -
+// scanning/associating/roaming - degrading the ESP-NOW link to the display
+// nodes even with power-save disabled and a runtime abandon-and-relock
+// fallback in place. Rather than patch that further, the default build never
+// attempts a Wi-Fi connection at all: no association, no scanning, no
+// roaming, nothing for a fallback to abandon. USB serial + ESP-NOW only. The
+// code for the old Wi-Fi-connected behavior (mDNS, ArduinoOTA, the WebSocket
+// dashboard path, Telnet) is preserved behind the flag, not deleted - see
+// ARCHITECTURE.md S5.1/S5.2 and set ESPDASH_GATEWAY_WIFI=1 to restore it.
+//
+// The WebSockets library is NOT thread-safe: when the flag is on,
+// webSocket.loop() and broadcastTXT() must both stay inside publishTask.
 // =========================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiMulti.h>
-#include <ESPmDNS.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include "driver/twai.h"
+
+#if ESPDASH_GATEWAY_WIFI
+#include <WiFiMulti.h>
+#include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <WebSocketsServer.h>
-#include "driver/twai.h"
+#endif
 
 #include <EspDashProto.h>
 #include "can_decode.h"
@@ -53,9 +68,47 @@ enum OperationalMode {
     MODE_DUAL = 2
 };
 
+// Independent of current_mode: streaming raw CAN over ESP-NOW to an SD
+// recorder node is orthogonal to what the USB/serial side is doing, so a
+// capture can run while the dashboard is in any mode (or nothing is attached
+// at all, which is the whole point - recording a drive without a laptop).
+//
+// Two independent sources can ask for streaming:
+//   manual  - LOG:ON over serial, latched until LOG:OFF. For bench work.
+//   node    - a recorder node repeatedly advertising that it wants data.
+//             Expires on its own if the adverts stop, so an unplugged node
+//             never leaves the gateway transmitting into the void.
+// Effective state is the OR of the two.
+static volatile bool     canlog_manual = false;
+static volatile bool     canlog_node_req = false;
+// Set by either stop path (serial LOG:OFF, or an explicit ESP-NOW stop
+// command) and drained by publishTask - the sole owner of canlog_buf/
+// canlog_count. Without this, a partial batch sitting in the buffer at the
+// moment of stop was neither sent nor cleared: it sat frozen until the
+// recorder was next armed, at which point canlog_flush_if_due()'s staleness
+// check trivially fired (its timer had been sitting for arbitrary minutes)
+// and shipped it as the FIRST packet of a completely different recording -
+// tail frames from one drive appearing, mislabeled with an ancient
+// timestamp, at the head of the next drive's file.
+static volatile bool     canlog_flush_on_stop = false;
+static volatile uint32_t canlog_node_req_ms = 0;
+
+static inline bool canlog_active() {
+    return canlog_manual || canlog_node_req;
+}
+
 static volatile OperationalMode current_mode = MODE_TELEMETRY;
 static volatile bool demo_mode = false;
+// Synthetic RAW-frame injector for bench-testing the SD recorder without a
+// car. demo_mode only fakes the decoded snapshot, so it exercises none of the
+// ring -> batch -> ESP-NOW -> SD path; two on-car bugs reached the vehicle
+// because that path had never been driven on a desk. Payload carries a
+// 32-bit sequence number so the host decoder can prove exact losslessness.
+static volatile bool     logtest_mode = false;
+static volatile uint32_t logtest_seq  = 0;
+#if ESPDASH_GATEWAY_WIFI
 static volatile bool ota_in_progress = false;
+#endif
 
 // =========================================================================
 // SHARED STATE  (canRxTask writes, publishTask reads, guarded by spinlock)
@@ -67,7 +120,11 @@ static portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
 // =========================================================================
 // RAW FRAME RING BUFFER  (canRxTask produces, publishTask consumes)
 // =========================================================================
-#define RAW_RING_SIZE 512
+// 2048 slots (~34 KB). Sized for the canlog path: at the measured 1399
+// frames/s this is ~1.4 s of buffer, enough to ride out radio backpressure
+// when batches contend with the 20 Hz telemetry broadcast. The serial RAW
+// path never needed this much, but the memory is cheap on an S3.
+#define RAW_RING_SIZE 2048
 
 typedef struct {
     uint32_t ms;
@@ -113,21 +170,46 @@ static inline bool ring_pop(RawSlot *out) {
 // =========================================================================
 // NETWORK
 // =========================================================================
+#if ESPDASH_GATEWAY_WIFI
 static WiFiMulti wifiMulti;
 static WebSocketsServer webSocket = WebSocketsServer(8888);
 static WiFiServer telnetServer(8889);
 static WiFiClient telnetClient;
-static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static uint16_t espnow_seq = 0;
 static String last_connected_ip = "";
-static volatile uint32_t espnow_send_fail = 0;
 
 // Once true, Wi-Fi has been deliberately abandoned for the rest of this boot
 // so ESP-NOW can sit on a fixed, stable channel. See the fallback logic in
-// loop() for why this exists.
+// loop() for why this exists. Only meaningful when a connection was ever
+// attempted in the first place.
 static volatile bool wifi_fallback_engaged = false;
+#endif
 
+static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint16_t espnow_seq = 0;
+// Separate sequence space for canlog packets. Sharing espnow_seq with the
+// 20 Hz telemetry stream made the node count every telemetry packet as a
+// missing canlog packet: a verified-lossless 16 s capture reported 343 gaps,
+// almost exactly the 320 telemetry + 8 ID-table packets sent in that window.
+// A loss counter that cries wolf is worse than none - it would have masked
+// real loss on the very first drive that had any.
+static uint16_t canlog_seq = 0;
+static volatile uint32_t espnow_send_fail = 0;
 static volatile uint32_t tx_truncated = 0;
+
+// canlog counters, reported by STATS so a lossy capture is visible
+static volatile uint32_t canlog_batches_sent = 0;
+static volatile uint32_t canlog_frames_sent = 0;
+// Deferred sends, NOT lost data: a batch that cannot go out is held and
+// retried, so this counts radio backpressure events. Frame loss shows up as
+// ring_dropped (ring overflowed while blocked) or as a gap in the recorded
+// sequence - never here.
+static volatile uint32_t canlog_send_fail = 0;
+static volatile uint32_t canlog_tx_retries = 0;
+static volatile int      canlog_last_err   = 0;
+static volatile uint32_t canlog_tx_waits   = 0;   // paced waits that timed out
+static bool              canlog_tx_blocked = false; // batch held, awaiting retry
+static volatile uint32_t espnow_rx_any = 0;   // any ESP-NOW packet received
+static volatile uint32_t espnow_rx_cmd = 0;   // parsed as a node command
 
 // USB CDC and TCP both accept short writes: write() returns how many bytes it
 // actually took, which is less than requested once the peer stops draining.
@@ -151,15 +233,17 @@ static void write_all(Print &out, const uint8_t *buf, size_t len) {
     if (sent < len) tx_truncated++;
 }
 
-// All three transports get byte-identical payloads. MUST only be called from
-// publishTask (WebSockets library is not thread-safe).
+// Every enabled transport gets a byte-identical payload. MUST only be called
+// from publishTask (WebSockets library is not thread-safe).
 static void broadcast_line(const char *str) {
     size_t len = strlen(str);
     write_all(Serial, (const uint8_t *)str, len);
+#if ESPDASH_GATEWAY_WIFI
     if (telnetClient && telnetClient.connected()) {
         write_all(telnetClient, (const uint8_t *)str, len);
     }
     webSocket.broadcastTXT((uint8_t *)str, len);
+#endif
 }
 
 // =========================================================================
@@ -204,7 +288,7 @@ static void apply_demo(CanDecodeState *s, float sim_t) {
     s->oil_temp_x10    = (int16_t)((92.0f + 4.0f * sinf(sim_t * 0.08f)) * 10.0f);
     s->battery_mv      = (uint16_t)((13.8f + 0.3f * sinf(sim_t * 0.5f)) * 1000.0f);
     s->gear            = gear_idx;
-    s->fuel_pct        = 78;
+    s->fuel_consumption_x10 = 85;   // demo: 8.5 L/100km
     s->throttle_pct    = throt;
     s->steering_deg    = steer;
     s->ambient_temp    = 23;
@@ -252,22 +336,84 @@ static void process_cmd_string(String cmd) {
                       : (current_mode == MODE_RAW_SNIFFER) ? "RAW_SNIFFER" : "DUAL";
         snprintf(buf, sizeof(buf), "[MODE] CURRENT:%s | DEMO:%s\n", m, demo_mode ? "ON" : "OFF");
         broadcast_line(buf);
+    } else if (cmd == "LOG:ON" || cmd == "LOG_ON" || cmd == "LOG:1") {
+        canlog_manual = true;
+        broadcast_line("[LOG] CAN log streaming ENABLED (ESP-NOW -> SD recorder)\n");
+    } else if (cmd == "LOG:OFF" || cmd == "LOG_OFF" || cmd == "LOG:0") {
+        canlog_manual = false;
+        canlog_flush_on_stop = true;
+        broadcast_line("[LOG] CAN log streaming DISABLED\n");
+    } else if (cmd == "LOGTEST:ON" || cmd == "LOGTEST:1") {
+        // Deliberately NOT reset: canlog_frames_sent and every other STATS
+        // counter is cumulative since boot, so zeroing this one made
+        // "injected" and "logframes" incomparable across two runs on one
+        // power cycle and looked like frames were being duplicated. Keeping
+        // it monotonic also means the sequence numbers in a capture stay
+        // unique for the whole session.
+        logtest_mode = true;
+        broadcast_line("[LOGTEST] synthetic 1400 fps injector ENABLED (needs LOG:ON or a node)\n");
+    } else if (cmd == "LOGTEST:OFF" || cmd == "LOGTEST:0") {
+        logtest_mode = false;
+        char b[64];
+        snprintf(b, sizeof(b), "[LOGTEST] disabled after %lu frames\n", (unsigned long)logtest_seq);
+        broadcast_line(b);
     } else if (cmd == "STATS") {
-        char buf[160];
+        char buf[300];
+#if ESPDASH_GATEWAY_WIFI
         snprintf(buf, sizeof(buf),
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
-                 "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s\n",
+                 "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
+                 "log:%s batches:%lu logframes:%lu logdefer:%lu rx_any:%lu rx_cmd:%lu "
+                 "injected:%lu retries:%lu txwait:%lu lasterr:%d\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
                  (unsigned long)twai_queue_full_events,
                  (unsigned long)tx_truncated,
                  (unsigned long)espnow_send_fail,
-                 wifi_fallback_engaged ? "yes" : "no");
+                 wifi_fallback_engaged ? "yes" : "no",
+                 canlog_active() ? "on" : "off",
+                 (unsigned long)canlog_batches_sent,
+                 (unsigned long)canlog_frames_sent,
+                 (unsigned long)canlog_send_fail,
+                 (unsigned long)espnow_rx_any,
+                 (unsigned long)espnow_rx_cmd,
+                 (unsigned long)logtest_seq,
+                 (unsigned long)canlog_tx_retries,
+                 (unsigned long)canlog_tx_waits,
+                 canlog_last_err);
+#else
+        // No wifi_fallback field: with no Wi-Fi station ever attempted,
+        // there's no connection to fall back from. espnow_send_fail is still
+        // meaningful - esp_now_send() can fail for reasons unrelated to
+        // Wi-Fi, such as an internal queue full.
+        snprintf(buf, sizeof(buf),
+                 "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
+                 "tx_trunc:%lu espnow_fail:%lu "
+                 "log:%s batches:%lu logframes:%lu logdefer:%lu rx_any:%lu rx_cmd:%lu "
+                 "injected:%lu retries:%lu txwait:%lu lasterr:%d\n",
+                 (unsigned long)g_snapshot.frames_decoded,
+                 (unsigned long)g_snapshot.checksum_rejects,
+                 (unsigned long)raw_dropped,
+                 (unsigned long)twai_queue_full_events,
+                 (unsigned long)tx_truncated,
+                 (unsigned long)espnow_send_fail,
+                 canlog_active() ? "on" : "off",
+                 (unsigned long)canlog_batches_sent,
+                 (unsigned long)canlog_frames_sent,
+                 (unsigned long)canlog_send_fail,
+                 (unsigned long)espnow_rx_any,
+                 (unsigned long)espnow_rx_cmd,
+                 (unsigned long)logtest_seq,
+                 (unsigned long)canlog_tx_retries,
+                 (unsigned long)canlog_tx_waits,
+                 canlog_last_err);
+#endif
         broadcast_line(buf);
     }
 }
 
+#if ESPDASH_GATEWAY_WIFI
 static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
     if (type == WStype_TEXT) {
         String cmd = String((char *)payload, length);
@@ -277,6 +423,7 @@ static void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_
         Serial.printf("[WebSocket] Client #%u connected from %s\n", num, ip.toString().c_str());
     }
 }
+#endif
 
 // =========================================================================
 // TWAI
@@ -335,7 +482,14 @@ static void canRxTask(void *arg) {
         g_snapshot = g_state;
         portEXIT_CRITICAL(&state_mux);
 
-        if (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL) {
+        // The raw ring feeds two independent consumers: the serial RAW text
+        // stream (mode-gated) and the ESP-NOW SD recorder (NOT mode-gated -
+        // see canlog_active()). Gating the producer on current_mode alone
+        // silently starved the recorder in the default MODE_TELEMETRY: the
+        // car decoded and drove the gauges perfectly while every recording
+        // came back with 0 frames.
+        if (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL ||
+            canlog_active()) {
             RawSlot s;
             s.ms  = now;
             s.id  = rx.identifier;
@@ -347,14 +501,283 @@ static void canRxTask(void *arg) {
     }
 }
 
+// Pushes synthetic frames at ~1400 fps (the measured real bus rate) using a
+// spread of genuine Honda IDs, so ID-table indexing and variable DLC are
+// exercised too. Frame N carries seq=N big-endian in data[0..3]; the decoder
+// then verifies received+dropped == sent with no gaps.
+static void inject_test_frames(uint32_t now) {
+    static const uint16_t ids[]  = {0x158,0x1D0,0x156,0x1A4,0x188,0x21E,0x17C,0x191,0x309,0x324};
+    static const uint8_t  dlcs[] = {8,8,5,8,8,8,8,7,8,8};
+    static uint32_t last = 0;
+    if (last == 0) last = now;
+    uint32_t elapsed = now - last;
+    if (elapsed == 0) return;
+    last = now;
+    // 1400 fps, capped so a long scheduling gap can't dump a huge burst.
+    uint32_t n = (elapsed * 1400) / 1000;
+    if (n > 128) n = 128;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t k = logtest_seq % (sizeof(ids)/sizeof(ids[0]));
+        RawSlot s;
+        s.ms  = now;
+        s.id  = ids[k];
+        s.rtr = 0;
+        s.dlc = dlcs[k];
+        memset(s.data, 0, 8);
+        s.data[0] = (uint8_t)(logtest_seq >> 24);
+        s.data[1] = (uint8_t)(logtest_seq >> 16);
+        s.data[2] = (uint8_t)(logtest_seq >> 8);
+        s.data[3] = (uint8_t)(logtest_seq);
+        ring_push(&s);
+        logtest_seq++;
+    }
+}
+
+// =========================================================================
+// CANLOG BATCHER - packs raw frames for the ESP-NOW SD recorder
+// =========================================================================
+// Called only from publishTask, so no locking is needed on the batch state.
+//
+// The ID table maps 11-bit CAN ids to a 1-byte index. This car has 45 unique
+// ids, so a byte is ample; anything beyond the table (a new id appearing
+// mid-drive) falls back to an escape marker plus the raw 16-bit id rather
+// than being dropped - an unexpected id is exactly the kind of thing worth
+// capturing.
+#define CANLOG_ID_TABLE_MAX 64
+#define CANLOG_BATCH_MAX_BYTES 240   // ESP-NOW hard limit is 250
+
+static uint16_t canlog_id_table[CANLOG_ID_TABLE_MAX];
+static uint8_t  canlog_id_count = 0;
+static uint32_t last_canlog_ids_send = 0;
+static uint32_t last_canlog_tx = 0;   // any canlog packet, for keepalive
+
+static uint8_t  canlog_buf[CANLOG_BATCH_MAX_BYTES];
+static uint16_t canlog_len = 0;       // bytes used in canlog_buf
+static uint8_t  canlog_count = 0;     // frames packed
+static uint32_t canlog_base_ms = 0;
+static uint32_t canlog_first_push_ms = 0;
+
+static uint8_t canlog_id_index(uint32_t id) {
+    for (uint8_t i = 0; i < canlog_id_count; i++) {
+        if (canlog_id_table[i] == (uint16_t)id) return i;
+    }
+    if (canlog_id_count < CANLOG_ID_TABLE_MAX) {
+        canlog_id_table[canlog_id_count] = (uint16_t)id;
+        return canlog_id_count++;
+    }
+    return ESPDASH_CANLOG_ID_ESCAPE;
+}
+
+// ESP-NOW hands packets to the Wi-Fi driver asynchronously and only a few TX
+// buffers exist. With no send callback registered the gateway had no idea when
+// one freed, so it simply fired as fast as publishTask produced batches and
+// took ESP_ERR_ESPNOW_NO_MEM (12391) whenever it outran the radio - 91 lost
+// batches in a 30 s bench run, ~1600 CAN frames, at a mere 60 packets/s and
+// 14 KB/s. The problem was never bandwidth; it was that nothing tracked
+// completion. Retrying blindly only papered over it (368 retries still left
+// 91 failures).
+//
+// Now every ESP-NOW transmission waits for the previous one to complete before
+// starting. That paces sends to whatever the radio can actually retire, which
+// is self-tuning and needs no magic delay constant.
+static volatile bool espnow_tx_busy = false;
+
+static void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
+    (void)mac; (void)status;
+    espnow_tx_busy = false;    // runs in Wi-Fi task context: keep it trivial
+}
+
+// Waits for the in-flight packet to retire, then sends. Bounded so a lost
+// completion callback can never wedge the gateway - it degrades to the old
+// fire-and-forget behaviour rather than blocking telemetry forever.
+static esp_err_t espnow_tx_paced(const uint8_t *pkt, size_t len) {
+    int w = 0;
+    while (w < 20 && espnow_tx_busy) { vTaskDelay(1); w++; }
+    if (w >= 20) canlog_tx_waits++;   // gave up waiting: radio genuinely behind
+    espnow_tx_busy = true;
+    esp_err_t e = esp_now_send(broadcast_mac, pkt, len);
+    if (e != ESP_OK) {
+        espnow_tx_busy = false;
+        // One retry after a yield covers the case where a buffer frees just
+        // as we gave up waiting.
+        if (e == ESP_ERR_ESPNOW_NO_MEM) {
+            canlog_tx_retries++;
+            vTaskDelay(2);
+            espnow_tx_busy = true;
+            e = esp_now_send(broadcast_mac, pkt, len);
+            if (e != ESP_OK) espnow_tx_busy = false;
+        }
+    }
+    if (e != ESP_OK) canlog_last_err = (int)e;
+    return e;
+}
+
+static esp_err_t canlog_tx(const uint8_t *pkt, size_t len) {
+    return espnow_tx_paced(pkt, len);
+}
+
+static bool canlog_send_batch() {
+    if (canlog_count == 0) return true;
+
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + CANLOG_BATCH_MAX_BYTES];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_CANLOG;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = (uint16_t)(sizeof(EspDashCanLogHdr) + canlog_len);
+    h->seq         = canlog_seq++;
+
+    EspDashCanLogHdr *ch = (EspDashCanLogHdr *)(pkt + sizeof(EspDashHeader));
+    ch->base_ms    = canlog_base_ms;
+    ch->count      = canlog_count;
+    ch->flags      = 0;
+    // Carry the gateway-side drop count so loss is recorded in the log file
+    // itself. A lossy capture must be visible, never silent.
+    ch->gw_dropped = (uint16_t)raw_dropped;
+
+    memcpy(pkt + sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr), canlog_buf, canlog_len);
+
+    size_t total = sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr) + canlog_len;
+    if (canlog_tx(pkt, total) != ESP_OK) {
+        // Hold the batch and retry on the next pass rather than discarding it.
+        // These are captured CAN frames; a momentarily busy radio is no reason
+        // to lose them. publishTask stops draining the ring while blocked, so
+        // backpressure lands in the 2048-frame ring (~1.5 s at full bus rate)
+        // and any genuine overflow is counted honestly by ring_dropped.
+        canlog_send_fail++;
+        canlog_tx_blocked = true;
+        return false;
+    }
+    canlog_batches_sent++;
+    canlog_frames_sent += canlog_count;
+    last_canlog_tx = millis();
+    canlog_tx_blocked = false;
+    canlog_len = 0;
+    canlog_count = 0;
+    return true;
+}
+
+static bool canlog_add_frame(const RawSlot *s) {
+    uint8_t dlc = s->dlc > 8 ? 8 : s->dlc;
+    uint8_t idx = canlog_id_index(s->id);
+    uint16_t need = 4 + dlc + (idx == ESPDASH_CANLOG_ID_ESCAPE ? 2 : 0);
+
+    if (canlog_count == 0) {
+        canlog_base_ms = s->ms;
+        canlog_first_push_ms = millis();
+    }
+    // Flush before overflowing either the byte budget or the frame count.
+    if (canlog_len + need > CANLOG_BATCH_MAX_BYTES ||
+        canlog_count >= ESPDASH_CANLOG_MAX_FRAMES) {
+        // Refuse the frame if the full batch could not go out - writing into a
+        // held batch would overflow canlog_buf. The caller holds it instead.
+        if (!canlog_send_batch()) return false;
+        canlog_base_ms = s->ms;
+        canlog_first_push_ms = millis();
+    }
+
+    uint32_t delta = s->ms - canlog_base_ms;
+    if (delta > 0xFFFF) delta = 0xFFFF;   // clamp; batches span far less than 65 s
+
+    uint8_t *p = canlog_buf + canlog_len;
+    *p++ = idx;
+    *p++ = dlc;
+    *p++ = (uint8_t)(delta & 0xFF);
+    *p++ = (uint8_t)(delta >> 8);
+    if (idx == ESPDASH_CANLOG_ID_ESCAPE) {
+        *p++ = (uint8_t)(s->id & 0xFF);
+        *p++ = (uint8_t)((s->id >> 8) & 0xFF);
+    }
+    memcpy(p, s->data, dlc);
+    canlog_len += need;
+    canlog_count++;
+    return true;
+}
+
+// Send the id table periodically so a recording that starts mid-stream is
+// still decodable on its own.
+static void canlog_send_ids(uint32_t now) {
+    if (canlog_id_count == 0) return;
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr) + CANLOG_ID_TABLE_MAX * 2];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_CANLOG_IDS;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = (uint16_t)(sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
+    // NOT canlog_seq: the node seq-checks only CANLOG batches/keepalives
+    h->seq         = espnow_seq++;
+
+    EspDashCanLogIdsHdr *ih = (EspDashCanLogIdsHdr *)(pkt + sizeof(EspDashHeader));
+    ih->count = canlog_id_count;
+    ih->reserved = 0;
+    uint8_t *ids = pkt + sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr);
+    for (uint8_t i = 0; i < canlog_id_count; i++) {
+        ids[i*2]     = (uint8_t)(canlog_id_table[i] & 0xFF);
+        ids[i*2 + 1] = (uint8_t)(canlog_id_table[i] >> 8);
+    }
+    espnow_tx_paced(pkt,
+                    sizeof(EspDashHeader) + sizeof(EspDashCanLogIdsHdr) + canlog_id_count * 2);
+    last_canlog_ids_send = now;
+}
+
+// Flush a partial batch that has been sitting too long (quiet bus), and
+// refresh the id table every 2 s.
+// Empty batch used purely as a liveness signal. The node cannot otherwise
+// tell "gateway is gone" from "gateway is fine but the CAN bus is quiet",
+// and it times out after 8 s either way.
+//
+// The id-table message was originally meant to serve as this heartbeat, but
+// it only sends when canlog_id_count > 0 - and that table is populated FROM
+// CAN frames. With the ignition off there are no frames, so the table stays
+// empty, nothing is transmitted at all, and the node gives up. That made it
+// impossible to arm a recording before turning the key, which is exactly
+// when the ignition-sequence data worth capturing appears.
+static void canlog_send_keepalive() {
+    uint8_t pkt[sizeof(EspDashHeader) + sizeof(EspDashCanLogHdr)];
+    EspDashHeader *h = (EspDashHeader *)pkt;
+    h->magic       = ESPDASH_MAGIC;
+    h->msg_type    = ESPDASH_MSG_CANLOG;
+    h->proto_major = ESPDASH_PROTO_MAJOR;
+    h->proto_minor = ESPDASH_PROTO_MINOR;
+    h->payload_len = sizeof(EspDashCanLogHdr);
+    h->seq         = canlog_seq++;
+
+    EspDashCanLogHdr *ch = (EspDashCanLogHdr *)(pkt + sizeof(EspDashHeader));
+    ch->base_ms    = millis();
+    ch->count      = 0;              // decoder handles this as a no-op batch
+    ch->flags      = 0;
+    ch->gw_dropped = (uint16_t)raw_dropped;
+
+    if (canlog_tx(pkt, sizeof(pkt)) == ESP_OK) {
+        last_canlog_tx = millis();
+    } else {
+        canlog_send_fail++;
+    }
+}
+
+static void canlog_flush_if_due(uint32_t now) {
+    if (canlog_count > 0 && (now - canlog_first_push_ms) >= 20) {
+        canlog_send_batch();
+    }
+    if (canlog_id_count > 0 && now - last_canlog_ids_send >= 2000) {
+        canlog_send_ids(now);
+    }
+    // Keep the link demonstrably alive on a silent bus.
+    if (now - last_canlog_tx >= 1000) {
+        canlog_send_keepalive();
+    }
+}
+
 // =========================================================================
 // CORE 0: PUBLISH TASK - owns every byte of output
 // =========================================================================
 
 // Dynamic signals must not sit frozen when the bus goes quiet: showing 5000
 // rpm on a switched-off car is worse than showing zero. Slow-moving signals
-// (coolant, fuel, battery, ambient, gear) legitimately persist and are left
-// at their last known value.
+// (coolant, fuel consumption, battery, ambient, gear) legitimately persist
+// and are left at their last known value.
 static void apply_staleness(CanDecodeState *s, uint32_t now) {
     const uint32_t T = 2000;
     if (can_decode_is_stale(s, SIG_RPM, now, T))      s->rpm = 0;
@@ -382,6 +805,7 @@ static void publishTask(void *arg) {
             process_cmd_string(Serial.readStringUntil('\n'));
         }
 
+#if ESPDASH_GATEWAY_WIFI
         // ---- 2. Network servicing (all WebSocket calls live here) --------
         if (WiFi.status() == WL_CONNECTED) {
             webSocket.loop();
@@ -401,20 +825,75 @@ static void publishTask(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+#endif
 
         // ---- 3. Drain the raw ring --------------------------------------
         // Budget per pass keeps JSON/ESP-NOW cadence from being starved by a
         // burst; 64 frames/ms is ~45x the measured mean rate.
+        //
+        // Each popped frame goes to whichever sinks are active: the serial
+        // RAW text stream (when in RAW/DUAL mode) and/or the ESP-NOW canlog
+        // batcher. A frame is popped exactly once and fanned out, so enabling
+        // the recorder never steals frames from a USB capture running at the
+        // same time.
+        if (logtest_mode && canlog_active()) inject_test_frames(now);
+
+        // A frame already popped and already echoed to the serial RAW stream,
+        // which the batcher could not accept because a previous batch is still
+        // waiting to go out. Retried before anything new is drained so ordering
+        // is preserved; only the canlog side is retried, since the serial side
+        // already emitted it.
+        static RawSlot held;
+        static bool    has_held = false;
+        if (has_held) {
+            if (canlog_add_frame(&held)) has_held = false;
+        }
+
         int budget = 64;
         RawSlot s;
-        while (budget-- > 0 && ring_pop(&s)) {
-            int p = snprintf(raw_buf, sizeof(raw_buf), "RAW,%lu,0x%03X,%u,%u",
-                             (unsigned long)s.ms, (unsigned int)s.id, s.rtr, s.dlc);
-            for (int i = 0; i < s.dlc && i < 8; i++) {
-                p += snprintf(raw_buf + p, sizeof(raw_buf) - p, ",%02X", s.data[i]);
+        bool serial_raw = (current_mode == MODE_RAW_SNIFFER || current_mode == MODE_DUAL);
+        while (!has_held && budget-- > 0 && ring_pop(&s)) {
+            if (serial_raw) {
+                int p = snprintf(raw_buf, sizeof(raw_buf), "RAW,%lu,0x%03X,%u,%u",
+                                 (unsigned long)s.ms, (unsigned int)s.id, s.rtr, s.dlc);
+                for (int i = 0; i < s.dlc && i < 8; i++) {
+                    p += snprintf(raw_buf + p, sizeof(raw_buf) - p, ",%02X", s.data[i]);
+                }
+                snprintf(raw_buf + p, sizeof(raw_buf) - p, "\n");
+                broadcast_line(raw_buf);
             }
-            snprintf(raw_buf + p, sizeof(raw_buf) - p, "\n");
-            broadcast_line(raw_buf);
+            if (canlog_active()) {
+                if (!canlog_add_frame(&s)) { held = s; has_held = true; }
+            }
+        }
+        // Flush a partial batch if it has been waiting too long, so the tail
+        // of a capture is never stranded when the bus goes quiet.
+        // Expire a node request that has stopped arriving: the recorder was
+        // switched off, unplugged, or drove out of range. Without this the
+        // gateway would keep transmitting into the void.
+        if (canlog_node_req && (now - canlog_node_req_ms) > ESPDASH_NODE_CMD_TIMEOUT_MS) {
+            canlog_node_req = false;
+            canlog_send_batch();   // don't strand a partial batch
+        }
+
+        // Send the ID table the instant the recorder is armed, not on the
+        // next 2 s tick. Without this the first 1-2 s of every recording has
+        // no table to resolve against; the decoder can patch that up
+        // retroactively, but only if a later table exists in the file - a
+        // capture power-cut inside its first 2 s would be undecodable.
+        {
+            static bool prev_active = false;
+            bool active = canlog_active();
+            if (active && !prev_active) last_canlog_ids_send = 0;
+            prev_active = active;
+        }
+        if (canlog_active()) {
+            canlog_flush_if_due(now);
+        } else if (canlog_flush_on_stop) {
+            // Runs exactly once per stop, after the last add_frame() for this
+            // session (add_frame is gated on canlog_active(), already false).
+            canlog_flush_on_stop = false;
+            canlog_send_batch();
         }
 
         // ---- 4. Snapshot -------------------------------------------------
@@ -450,7 +929,7 @@ static void publishTask(void *arg) {
             t->oil_temp_x10    = snap.oil_temp_x10;
             t->battery_mv      = snap.battery_mv;
             t->gear            = (snap.gear == 0xFF) ? 0 : snap.gear;
-            t->fuel_pct        = snap.fuel_pct;
+            t->fuel_consumption_x10 = snap.fuel_consumption_x10;
             t->steering_deg    = snap.steering_deg;
             t->ambient_temp    = snap.ambient_temp;
             t->flags           = can_decode_flags(&snap);
@@ -463,11 +942,16 @@ static void publishTask(void *arg) {
             t->wheel_rr_x10    = snap.wheel_rr_x10;
 
             // peer.channel = 0 makes ESP-NOW follow the station's current
-            // channel, which is only well-defined while genuinely associated.
-            // A failure here is exactly the failure mode that motivated the
-            // fallback in loop(): silent while Wi-Fi is mid-reconnect, and
-            // otherwise invisible without this counter.
-            if (esp_now_send(broadcast_mac, pkt, sizeof(pkt)) != ESP_OK) {
+            // channel. With ESPDASH_GATEWAY_WIFI=0 (the default) that channel
+            // is fixed at boot and never changes, so this essentially cannot
+            // fail for channel reasons. With the flag on, a connection lost
+            // mid-run leaves the channel transiently undefined - the failure
+            // mode the loop() fallback exists to recover from - and this
+            // counter is what makes that failure visible instead of silent.
+            // Paced like the log path: telemetry sharing the radio
+            // un-paced would keep stealing the TX buffers the recorder
+            // needs, which is half of why the recorder saw NO_MEM.
+            if (espnow_tx_paced(pkt, sizeof(pkt)) != ESP_OK) {
                 espnow_send_fail++;
             }
         }
@@ -483,7 +967,7 @@ static void publishTask(void *arg) {
             snprintf(json_buf, sizeof(json_buf),
                 "{\"type\":\"telemetry\",\"mac\":\"%s\",\"rpm\":%u,\"speed\":%.1f,"
                 "\"water_temp\":%.1f,\"oil_temp\":%.1f,\"battery_v\":%.2f,\"gear\":%u,"
-                "\"fuel\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
+                "\"fuel_consumption_x10\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
                 "\"tc\":%s,\"brake_sw\":%s,\"cel\":%s,\"vsa_warn\":%s,\"w_fl\":%.1f,"
                 "\"w_fr\":%.1f,\"w_rl\":%.1f,\"w_rr\":%.1f,\"ambient\":%d,"
                 "\"dropped\":%lu,\"timestamp\":%lu}\n",
@@ -494,7 +978,7 @@ static void publishTask(void *arg) {
                 snap.oil_temp_x10 / 10.0f,
                 snap.battery_mv / 1000.0f,
                 (snap.gear == 0xFF) ? 0 : snap.gear,
-                snap.fuel_pct,
+                snap.fuel_consumption_x10,
                 snap.throttle_pct,
                 snap.steering_deg,
                 snap.brake_pct,
@@ -520,11 +1004,36 @@ static void publishTask(void *arg) {
 // =========================================================================
 // ESP-NOW
 // =========================================================================
+// Upstream messages from recorder nodes. Runs in the Wi-Fi task context, so
+// it only touches a couple of volatiles and returns - no logging, no I/O.
+#if defined(ESP_IDF_VERSION_MAJOR) && ESP_IDF_VERSION_MAJOR >= 5
+static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+#else
+static void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
+#endif
+    espnow_rx_any++;
+    const EspDashNodeCmd *cmd = espdash_parse_nodecmd(data, len);
+    if (!cmd) return;
+    espnow_rx_cmd++;
+
+    if (cmd->want_canlog) {
+        canlog_node_req = true;
+        canlog_node_req_ms = millis();
+    } else {
+        // An explicit "stop" takes effect immediately rather than waiting
+        // for the timeout, so releasing the button feels instant.
+        canlog_node_req = false;
+        canlog_flush_on_stop = true;
+    }
+}
+
 static void init_esp_now() {
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESP-NOW] Initialization failed!");
         return;
     }
+    esp_now_register_recv_cb(onEspNowRecv);
+    esp_now_register_send_cb(onEspNowSent);
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, broadcast_mac, 6);
     peer.channel = 0;   // follow the station channel
@@ -559,6 +1068,7 @@ void setup() {
         Serial.println("[TWAI] INSTALL FAILED");
     }
 
+#if ESPDASH_GATEWAY_WIFI
     wifiMulti.addAP("Comlex_parking", "12345678");
     wifiMulti.addAP("Complex_parking", "12345678");
     wifiMulti.addAP("Bazanski_ph", "52288488");
@@ -594,11 +1104,28 @@ void setup() {
         telnetServer.begin();
         telnetServer.setNoDelay(true);
     } else {
-        Serial.println("[Wi-Fi TIMEOUT] Not connected. Locking to channel 1 for ESP-NOW.");
+        Serial.println("[Wi-Fi TIMEOUT] Not connected. Locking to fixed channel for ESP-NOW.");
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_STA);
-        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
     }
+#else
+    // No Wi-Fi station is ever attempted: no association, no scanning, no
+    // roaming, and therefore nothing for a runtime fallback to abandon. This
+    // is what actually fixed the on-car ESP-NOW instability - see the banner
+    // comment at the top of this file. Set ESPDASH_GATEWAY_WIFI=1 in
+    // platformio.ini and rebuild to restore mDNS/OTA/WebSocket/Telnet.
+    Serial.println("[Wi-Fi] Disabled at build time (ESPDASH_GATEWAY_WIFI=0). USB + ESP-NOW only.");
+    // Order matters: disconnect(true, true)'s second argument stops the Wi-Fi
+    // radio outright (esp_wifi_stop()). WiFi.mode(WIFI_STA) must come AFTER
+    // it, since that's what restarts the radio into STA mode - reversing
+    // this order leaves the interface down and esp_now_send() failing with
+    // ESP_ERR_ESPNOW_IF on every call, which is exactly what happened here
+    // the first time this was written with the calls the other way round.
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+#endif
 
     // Wi-Fi STA modem sleep makes the radio doze between DTIM beacons, which
     // costs ESP-NOW packets on both ends of the link. The gateway is mains/
@@ -623,17 +1150,20 @@ void setup() {
 }
 
 // =========================================================================
-// LOOP (core 1, prio 1) - OTA and Wi-Fi maintenance only
+// LOOP (core 1, prio 1) - Wi-Fi/OTA maintenance when enabled, TWAI recovery
+// always
 // =========================================================================
 void loop() {
-    static uint32_t last_wifi_check = 0, last_diag = 0;
+    static uint32_t last_diag = 0;
+    uint32_t now = millis();
+
+#if ESPDASH_GATEWAY_WIFI
+    static uint32_t last_wifi_check = 0;
     static uint32_t wifi_lost_since = 0;
 
     if (WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.handle();
     }
-
-    uint32_t now = millis();
 
     if (now - last_wifi_check >= 5000) {
         last_wifi_check = now;
@@ -662,27 +1192,26 @@ void loop() {
             // gateway reboot "fixes" it only because it re-runs the boot-time
             // timeout path and lands back on a stable, fixed channel.
             //
-            // So: give a real reconnect attempt 20s (a couple of AP retry
-            // cycles), then deliberately abandon Wi-Fi for the rest of this
-            // boot and fall back to the same fixed-channel behavior the
-            // boot-time timeout already uses. ESP-NOW telemetry is the
-            // higher-priority function while driving; regaining the
-            // dashboard/OTA link can wait for the next reboot.
+            // This mitigation is what ESPDASH_GATEWAY_WIFI=0 (the default)
+            // supersedes: with no Wi-Fi ever attempted, there's nothing to
+            // lose and nothing to abandon. Kept here, gated, for when Wi-Fi
+            // is deliberately re-enabled.
             if (!wifi_fallback_engaged) {
                 if (wifi_lost_since == 0) {
                     wifi_lost_since = now;
                 } else if (now - wifi_lost_since >= 20000) {
                     wifi_fallback_engaged = true;
                     Serial.println("[Wi-Fi] Lost for 20s - abandoning reconnect, "
-                                   "locking ESP-NOW to channel 1 for stability");
+                                   "locking ESP-NOW to a fixed channel for stability");
                     WiFi.setAutoReconnect(false);
                     WiFi.disconnect(true, true);
                     WiFi.mode(WIFI_STA);
-                    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+                    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
                 }
             }
         }
     }
+#endif
 
     if (now - last_diag >= 5000) {
         last_diag = now;

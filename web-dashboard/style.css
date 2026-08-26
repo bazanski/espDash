@@ -27,6 +27,25 @@
     --radius-full: 9999px;
 }
 
+/* EEZ Studio Theme 18: The Black White Shapes */
+[data-theme="theme-18"] {
+    --bg-dark: #000000;
+    --bg-card: rgba(18, 18, 18, 0.9);
+    --bg-card-hover: rgba(30, 30, 30, 0.95);
+    --border-color: #9A9797;
+    --border-glow: rgba(219, 207, 207, 0.4);
+
+    --text-main: #ffffff;
+    --text-muted: #9A9797;
+    --text-dim: #666666;
+
+    --accent-cyan: #DBCFCF;
+    --accent-green: #ffffff;
+    --accent-amber: #9A9797;
+    --accent-crimson: #ffffff;
+    --accent-purple: #DBCFCF;
+}
+
 * {
     box-sizing: border-box;
     margin: 0;

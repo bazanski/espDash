@@ -1,35 +1,61 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiMulti.h>
-#include <ESPmDNS.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
-#include <ArduinoOTA.h>
-#include <WebServer.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
+#include <lvgl.h>
+#include "ui.h"
+#include "screens.h"
+
+#if ESPDASH_NODE_WIFI
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
+#include <WebServer.h>
+#endif
 
 // =========================================================================
 // ESP-NOW TELEMETRY - shared wire protocol
 // =========================================================================
+// The packet layout lives in firmware/shared/EspDashProto. Do NOT paste a
+// copy of the struct in here: that is exactly how the gateway and this node
+// drifted apart before.
 #include <EspDashProto.h>
 
 static EspDashTelemetry current_pkt = {0};
-static uint16_t  current_payload_len = 0;
+static uint16_t  current_payload_len = 0;   // what the sender actually sent
 static uint32_t  last_pkt_rx_time = 0;
 static uint16_t  last_seq = 0;
-static volatile uint32_t pkt_gaps = 0;
-static volatile uint32_t pkt_count = 0;
+static volatile uint32_t pkt_gaps = 0;      // missed sequence numbers
+static volatile uint32_t pkt_count = 0;     // valid packets since boot
 static bool      ever_linked = false;
 
-static uint8_t  espnow_channel = 1;
+// ---- ESP-NOW channel ----------------------------------------------------
+// With ESPDASH_NODE_WIFI=0 (the default) this node never associates to
+// Wi-Fi, so it locks to ESPDASH_ESPNOW_CHANNEL in setup() - the same fixed
+// constant the gateway uses - and never needs to move. The channel-sweep
+// logic below only runs when the flag is on: in that mode the node's own
+// Wi-Fi may park the radio on whatever channel a real AP uses, which
+// silently deafens it to the gateway's fixed-channel broadcasts whenever the
+// two don't match (measured on the bench: 0 packets received, holding
+// steady on the AP's channel for 29+ seconds). Sweeping is how a Wi-Fi-
+// connected node finds the gateway anyway in that case.
+static uint8_t  espnow_channel = ESPDASH_ESPNOW_CHANNEL;
 static bool     channel_locked = false;
+#if ESPDASH_NODE_WIFI
 static uint32_t last_channel_hop = 0;
-#define CHANNEL_HOP_MS   200
-#define LINK_TIMEOUT_MS  1500
+#define CHANNEL_HOP_MS   200    // dwell per channel while searching
+#endif
+#define LINK_TIMEOUT_MS  1500   // no valid packet => link considered lost
 
+// LINK_LOST is deliberately distinct from LINK_SEARCHING: a gauge that had a
+// gateway and lost it is a fault worth showing, whereas one that has never
+// seen a gateway is just still looking.
 enum LinkState { LINK_LIVE, LINK_SEARCHING, LINK_LOST };
 
+// The channel the radio is actually on, which is not necessarily
+// espnow_channel: when Wi-Fi is associated it owns the channel and the scan
+// never runs, so the scan variable would misreport it.
 static uint8_t actual_channel() {
     uint8_t ch = 0;
     wifi_second_chan_t sec;
@@ -56,11 +82,22 @@ static TFT_eSprite spr = TFT_eSprite(&tft);
 #define COLOR_DARK_GRAY 0x18E3 // Track bg gray
 
 // =========================================================================
-// MULTI-WIFI & WEB OTA SERVER
+// MULTI-WIFI & WEB OTA SERVER  (ESPDASH_NODE_WIFI=1 only)
 // =========================================================================
-static WiFiMulti wifiMulti;
-static WebServer webServer(80);
+#if ESPDASH_NODE_WIFI
+struct WifiNet { const char *ssid, *pass; };
+static const WifiNet WIFI_NETS[] = {
+    {"Complex_parking", "12345678"},
+    {"Bazanski_ph",     "52288488"},
+    {"Bazanski_IS",     "52288488"},
+    {"IOT-monday",      "fsdL2Dp*KBU0y#9F&c!Zbq853axj"},
+};
+static const int WIFI_NET_COUNT = sizeof(WIFI_NETS) / sizeof(WIFI_NETS[0]);
 
+static WebServer webServer(80);
+static uint32_t last_wifi_check = 0;
+
+// Simple WebOTA Status & Update HTML Page
 const char* ota_index_html = 
 "<!DOCTYPE html><html><head><title>xiao-round-gauge.local WebOTA</title>"
 "<style>body{background:#0b0f19;color:#fff;font-family:sans-serif;text-align:center;padding:50px;}"
@@ -93,7 +130,7 @@ void setup_web_ota() {
             }
         } else if (upload.status == UPLOAD_FILE_END) {
             if (Update.end(true)) {
-                Serial.printf("Update Success: %uB\n", upload.totalSize);
+                Serial.printf("Update Success: %u bytes\n", upload.totalSize);
             } else {
                 Update.printError(Serial);
             }
@@ -101,17 +138,27 @@ void setup_web_ota() {
     });
     webServer.begin();
 }
+#endif  // ESPDASH_NODE_WIFI
 
-// ESP-NOW Receive Callback
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-    uint16_t plen = (uint16_t)len;
-    if (plen < sizeof(EspDashHeader)) return;
+// =========================================================================
+// ESP-NOW RECEIVE CALLBACK
+// =========================================================================
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+    uint16_t plen = 0, seq = 0;
+    const EspDashTelemetry *t = espdash_parse(incomingData, len, &plen, &seq);
+    if (!t) return;   // not ours, or an incompatible major version
 
-    const EspDashHeader* hdr = (const EspDashHeader*)incomingData;
-    if (hdr->magic != ESPDASH_MAGIC) return;
+    // Copy only what the sender actually provided, leaving any newer trailing
+    // fields we do not know about at zero. This is what lets an old node keep
+    // working against a newer gateway.
+    uint16_t copy = plen < sizeof(EspDashTelemetry) ? plen : sizeof(EspDashTelemetry);
+    memset(&current_pkt, 0, sizeof(current_pkt));
+    memcpy(&current_pkt, t, copy);
+    current_payload_len = plen;
 
-    uint16_t seq = hdr->seq;
     if (ever_linked) {
+        // Count how many packets were actually missed, not just how many times
+        // a discontinuity occurred - the difference matters when diagnosing.
         uint16_t missed = (uint16_t)(seq - last_seq - 1);
         if (missed && missed < 1000) pkt_gaps += missed;
     }
@@ -123,7 +170,25 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     if (!channel_locked) {
         channel_locked = true;
         espnow_channel = actual_channel();
-        Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n", espnow_channel, plen);
+        Serial.printf("[ESP-NOW] Locked to channel %u (proto payload %u bytes)\n",
+                      espnow_channel, plen);
+    }
+}
+
+static const char* get_gear_str(uint8_t g) {
+    switch(g) {
+        case 0: return "P";
+        case 1: return "R";
+        case 2: return "N";
+        case 3: return "D";
+        case 4: return "S";
+        case 5: return "1";
+        case 6: return "2";
+        case 7: return "3";
+        case 8: return "4";
+        case 9: return "5";
+        case 10: return "6";
+        default: return "D";
     }
 }
 
@@ -185,6 +250,10 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     }
 
     // 4. Brake Pressure Arc (240° to 300°, 60° sweep, 180° rotated)
+    // The brake switch (a distinct binary signal from the pressure below) is
+    // shown by lighting the whole gauge - arc and readout - in alert red
+    // instead of drawing a new indicator, since this display has no verified
+    // free space for one and a wrongly-placed element is worse than none.
     bool brakeEngaged = (pkt.flags & ESPDASH_FLAG_BRAKE_SWITCH) != 0;
     uint16_t brakeColor = brakeEngaged ? COLOR_RED : COLOR_BLUE;
 
@@ -193,6 +262,8 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
 
     spr.drawSmoothArc(cx, cy, 82, 76, 240, 300, COLOR_DARK_GRAY, COLOR_BG, false);
     if (brRatio > 0.01f || brakeEngaged) {
+        // Engaged-but-near-zero-pressure still needs to show something, so
+        // floor the arc to a small visible sliver rather than drawing nothing.
         uint32_t litStartDeg = brakeEngaged ? min((uint32_t)295, brStartDeg) : brStartDeg;
         spr.drawSmoothArc(cx, cy, 82, 76, litStartDeg, 300, brakeColor, COLOR_BG, true);
     }
@@ -261,7 +332,7 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextColor(COLOR_WHITE, COLOR_BG);
     spr.drawString(gearStr, cx + 48, cy + 62);
 
-    // 10. Top Status Badge - link state, never a silent fake
+    // 9. Top Status Badge - link state, never a silent fake
     const char *badge;
     uint16_t badge_col;
     switch (link) {
@@ -276,6 +347,9 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextDatum(TC_DATUM);
     spr.drawString(badge, cx, 16);
 
+    // Second status line is shared: while searching, show which channel is
+    // being probed so a mismatch is diagnosable; otherwise show battery
+    // voltage there instead, since a real packet means real data.
     if (link == LINK_SEARCHING && !channel_locked) {
         spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
         spr.drawString("ch " + String(espnow_channel), cx, 30);
@@ -293,43 +367,72 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
 // =========================================================================
 // SETUP
 // =========================================================================
+uint32_t g_telemetry_rpm = 0;
+uint32_t g_telemetry_throttle = 0;
+
 void setup() {
     Serial.begin(115200);
+    delay(300);
 
+    Serial.println("\n=================================================================");
+    Serial.println(" 🏎️ espDash XIAO ROUND GAUGE (esp32-gauge-round.local)");
+    Serial.println(" DISPLAY: GC9A01 240x240 Round TFT (SPI)");
+    Serial.println("=================================================================");
+
+    // Turn on display backlight (GPIO 43 on XIAO ESP32-S3 round expansion board)
+    pinMode(43, OUTPUT);
+    digitalWrite(43, HIGH);
+
+    // Initialize GC9A01 TFT Display
     tft.init();
-    tft.setRotation(0);
+    tft.setRotation(0); // Hardware rotation 0 (rotates full screen and all elements by 180 degrees)
     tft.fillScreen(TFT_BLACK);
 
-    spr.setColorDepth(16);
-    spr.createSprite(240, 240);
-
-    // Boot splash screen
+    // Render 3-Second Startup Splash Screen with IP Address or Standalone ESP-NOW
+    tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawCentreString("espDash Telemetry", 120, 65, 4);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawCentreString("XIAO Round Gauge Ready", 120, 110, 2);
 
-    wifiMulti.addAP("IOT-monday", "fsdL2Dp*KBU0y#9F&c!Zbq853axj");
-    wifiMulti.addAP("Complex_parking", "12345678");
-    wifiMulti.addAP("Comlex_parking", "12345678");
-    wifiMulti.addAP("Bazanski_ph", "52288488");
-    wifiMulti.addAP("Bazanski_IS", "52288488");
-
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawCentreString("Connecting Wi-Fi...", 120, 140, 2);
-
-    uint32_t t0 = millis();
-    bool connected = false;
-    while (millis() - t0 < 10000) {
-        if (wifiMulti.run() == WL_CONNECTED) {
-            connected = true;
-            break;
+#if ESPDASH_NODE_WIFI
+    // Wi-Fi connection attempt, hard-bounded to 15s total.
+    //
+    // This used to call WiFiMulti's run(), wrapped in the same 15s while-loop
+    // structure still below - and still hung indefinitely anyway. run() is a
+    // single blocking call, and an AP replying "association refused, comeback
+    // time" makes the ESP-IDF driver honor that backoff *inside* the call, so
+    // control never returns to let the outer loop's deadline check run at
+    // all. Measured on the bench: 75+ seconds of total silence with no bound
+    // whatsoever, after exactly that AP response.
+    //
+    // WiFi.begin() returns immediately (the connection happens in the
+    // background) and WiFi.status() is a cheap, non-blocking poll, so a loop
+    // built on those genuinely enforces a deadline no matter what the driver
+    // or a hostile AP does underneath - which is the actual point of having
+    // a timeout here at all.
+    uint32_t start_connect = millis();
+    bool wifi_ok = false;
+    for (int i = 0; i < WIFI_NET_COUNT && !wifi_ok && (millis() - start_connect < 15000); i++) {
+        WiFi.begin(WIFI_NETS[i].ssid, WIFI_NETS[i].pass);
+        uint32_t attempt_start = millis();
+        // Budget each network a slice of the total, but never overrun it.
+        uint32_t per_net_budget = 15000 / WIFI_NET_COUNT;
+        while (millis() - attempt_start < per_net_budget &&
+               millis() - start_connect < 15000) {
+            if (WiFi.status() == WL_CONNECTED) { wifi_ok = true; break; }
+            delay(150);
+            String dots = "Connecting";
+            int cnt = ((millis() - start_connect) / 400) % 4;
+            for (int j = 0; j < cnt; j++) dots += ".";
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            tft.drawCentreString(dots + "   ", 120, 150, 2);
         }
-        delay(200);
+        if (!wifi_ok) WiFi.disconnect();
     }
 
-    if (connected) {
-        String ssidStr = "Wi-Fi: " + WiFi.SSID();
+    if (wifi_ok) {
+        String ssidStr = "SSID: " + WiFi.SSID();
         String ipStr   = "IP: " + WiFi.localIP().toString();
         tft.setTextColor(TFT_CYAN, TFT_BLACK);
         tft.drawCentreString(ssidStr, 120, 140, 2);
@@ -345,11 +448,71 @@ void setup() {
         tft.drawCentreString("Standalone (ESP-NOW)", 120, 150, 2);
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_STA);
-        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    }
+#else
+    // No Wi-Fi is ever attempted: no association, so no chance of parking the
+    // radio on a channel that doesn't match the gateway's fixed
+    // ESPDASH_ESPNOW_CHANNEL. Order matters here - disconnect(true, true)'s
+    // second argument stops the radio outright, so WiFi.mode(WIFI_STA) must
+    // come AFTER it to restart it into STA mode; reversed, ESP-NOW fails
+    // every send with ESP_ERR_ESPNOW_IF (found and fixed on the gateway the
+    // same way earlier this session).
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawCentreString("Standalone (ESP-NOW)", 120, 150, 2);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+#endif
+
+    spr.setColorDepth(16);
+    spr.createSprite(240, 240);
+
+    // Initialize LVGL 8 & EEZ Studio UI (Screen 1)
+    lv_init();
+    static lv_color_t buf[240 * 10];
+    static lv_disp_draw_buf_t draw_buf;
+    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 240 * 10);
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = 240;
+    disp_drv.ver_res = 240;
+    disp_drv.flush_cb = [](lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+        uint32_t w = (area->x2 - area->x1 + 1);
+        uint32_t h = (area->y2 - area->y1 + 1);
+        tft.startWrite();
+        tft.setAddrWindow(area->x1, area->y1, w, h);
+        tft.pushColors((uint16_t *)&color_p->full, w * h, true);
+        tft.endWrite();
+        lv_disp_flush_ready(disp);
+    };
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+
+    ui_init();
+
+    // Ensure matching dark background (#0b0f19) & remove ugly widget boxes
+    if (objects.main) {
+        lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x0b0f19), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
     }
 
-    delay(2000);
+    lv_obj_t* widgets[] = {
+        objects.rpm_level_arc, objects.brake_pressure_arc, objects.gas_pedal_arc,
+        objects.speed_value, objects.speed_type_label, objects.gas_pedal_value,
+        objects.brake_pressure_value, objects.battery_voltage_value,
+        objects.coolant_temp_value, objects.fuel_level_value, objects.gear_value
+    };
+    for (int i = 0; i < 11; i++) {
+        if (widgets[i]) {
+            lv_obj_set_style_bg_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_outline_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_shadow_opa(widgets[i], LV_OPA_TRANSP, LV_PART_MAIN);
+        }
+    }
 
+    // ESP-NOW Setup
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     if (esp_now_init() == ESP_OK) {
@@ -361,22 +524,31 @@ void setup() {
 // MAIN LOOP
 // =========================================================================
 void loop() {
+#if ESPDASH_NODE_WIFI
+    // Only process OTA & HTTP requests if Wi-Fi is actively connected
     if (WiFi.status() == WL_CONNECTED) {
         ArduinoOTA.handle();
         webServer.handleClient();
     }
+#endif
 
     uint32_t now = millis();
 
+#if ESPDASH_NODE_WIFI
+    // WiFi Maintenance & Auto-Reconnect
     if (WiFi.status() == WL_CONNECTED) {
         WiFi.setAutoReconnect(true);
     }
+#endif
 
+    // ---- ESP-NOW link supervision & channel discovery -------------------
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
 
+#if ESPDASH_NODE_WIFI
     if (!live && WiFi.status() != WL_CONNECTED) {
         if (channel_locked) {
             channel_locked = false;
+            Serial.println("[ESP-NOW] Link lost, resuming channel scan");
         }
         if (now - last_channel_hop >= CHANNEL_HOP_MS) {
             last_channel_hop = now;
@@ -384,6 +556,7 @@ void loop() {
             esp_wifi_set_channel(espnow_channel, WIFI_SECOND_CHAN_NONE);
         }
     }
+#endif
 
     LinkState link = live ? LINK_LIVE : (ever_linked ? LINK_LOST : LINK_SEARCHING);
     bool is_demo = (link == LINK_SEARCHING);
@@ -391,17 +564,83 @@ void loop() {
     EspDashTelemetry active_pkt = {0};
     if (is_demo) {
         float phase = now * 0.002f;
-        active_pkt.rpm = 3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500;
+        active_pkt.rpm = (uint16_t)(3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500);
         active_pkt.speed_kmh_x10 = (uint16_t)((90 + sin(phase * 0.8f) * 40) * 10);
         active_pkt.water_temp_x10 = (int16_t)((92 + sin(phase * 0.2f) * 6) * 10);
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
         active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.gear = 4;
+        active_pkt.fuel_pct = (uint8_t)(75 + sin(phase * 0.1f) * 20);
+        active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000); // Dynamic 11.2V - 14.8V sweep
+        active_pkt.gear = (uint8_t)(5 + ((int)(now * 0.0004f) % 6));
     } else {
         active_pkt = current_pkt;
     }
 
-    render_gauge_ui(active_pkt, link);
-    delay(20);
+    // Keep global telemetry variables synced for EEZ Studio tick functions
+    g_telemetry_rpm = active_pkt.rpm;
+    g_telemetry_throttle = active_pkt.throttle_pct;
+
+    // Periodic link health logger
+    static uint32_t last_link_log = 0, last_pkt_count = 0;
+    if (now - last_link_log >= 2000) {
+        uint32_t n = pkt_count;
+        float hz = (n - last_pkt_count) * 1000.0f / (now - last_link_log);
+        last_link_log = now;
+        last_pkt_count = n;
+        const char *st = (link == LINK_LIVE) ? "LIVE"
+                       : (link == LINK_LOST) ? "LOST" : "SEARCHING";
+        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu gaps:%lu payload:%u "
+                      "rpm:%u spd:%.1f gear:%u thr:%u\n",
+                      st, actual_channel(), hz, (unsigned long)n,
+                      (unsigned long)pkt_gaps, current_payload_len,
+                      current_pkt.rpm, current_pkt.speed_kmh_x10 / 10.0f,
+                      current_pkt.gear, current_pkt.throttle_pct);
+    }
+
+    // ---- Dual Screen 10-Second Auto Carousel ----
+    static uint32_t last_carousel_switch = 0;
+    static uint8_t active_screen = 1; // 1 = EEZ Studio UI, 2 = Production UI
+
+    if (now - last_carousel_switch >= 10000) {
+        last_carousel_switch = now;
+        active_screen = (active_screen == 1) ? 2 : 1;
+        if (active_screen == 1) {
+            // Wipes screen 2 graphics from TFT framebuffer and forces LVGL to re-render screen 1 completely
+            tft.fillScreen(COLOR_BG);
+            if (lv_scr_act()) lv_obj_invalidate(lv_scr_act());
+        }
+        Serial.printf("[CAROUSEL] Switched to Screen %d (%s)\n",
+                      active_screen, (active_screen == 1) ? "EEZ Studio UI" : "Production UI");
+    }
+
+    if (active_screen == 1) {
+        ui_tick();
+
+        // Screen 1: Update EEZ Studio LVGL Widgets with 20Hz Telemetry & Demo Sweep
+        if (objects.rpm_level_arc) lv_arc_set_value(objects.rpm_level_arc, active_pkt.rpm);
+        if (objects.speed_value) lv_label_set_text_fmt(objects.speed_value, "%d", active_pkt.speed_kmh_x10 / 10);
+        if (objects.gas_pedal_arc) lv_arc_set_value(objects.gas_pedal_arc, active_pkt.throttle_pct);
+        if (objects.gas_pedal_value) lv_label_set_text_fmt(objects.gas_pedal_value, "%d%%", active_pkt.throttle_pct);
+        if (objects.brake_pressure_arc) lv_arc_set_value(objects.brake_pressure_arc, active_pkt.brake_pct);
+        if (objects.brake_pressure_value) lv_label_set_text_fmt(objects.brake_pressure_value, "%d%%", active_pkt.brake_pct);
+        if (objects.battery_voltage_value) {
+            uint16_t mv = active_pkt.battery_mv;
+            if (mv > 0) {
+                lv_label_set_text_fmt(objects.battery_voltage_value, "%d.%dV", mv / 1000, (mv % 1000) / 100);
+            } else {
+                lv_label_set_text(objects.battery_voltage_value, "--.-V");
+            }
+        }
+        if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
+        if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
+        if (objects.gear_value) lv_label_set_text(objects.gear_value, get_gear_str(active_pkt.gear));
+
+        lv_timer_handler();
+    } else {
+        // Screen 2: Current Production UI (render_gauge_ui - 100% unchanged)
+        render_gauge_ui(active_pkt, link);
+    }
+
+    delay(20); // ~50 FPS target
 }
