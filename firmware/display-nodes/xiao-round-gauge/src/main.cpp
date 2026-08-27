@@ -306,7 +306,7 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.drawString(String((int)waterC) + "°C", cx - 48, cy + 62);
 
     // 8. Fuel Level Badge (Bottom Center)
-    uint8_t fuel = pkt.fuel_pct;
+    uint8_t fuel = pkt.fuel_consumption_x10;
     bool isLowFuel = fuel <= 15;
     spr.setTextColor(isLowFuel ? COLOR_RED : COLOR_GREEN, COLOR_BG);
     spr.setTextDatum(MC_DATUM);
@@ -570,7 +570,7 @@ void loop() {
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
         active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.fuel_pct = (uint8_t)(75 + sin(phase * 0.1f) * 20);
+        active_pkt.fuel_consumption_x10 = (uint8_t)(75 + sin(phase * 0.1f) * 20);
         active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000); // Dynamic 11.2V - 14.8V sweep
         active_pkt.gear = (uint8_t)(5 + ((int)(now * 0.0004f) % 6));
     } else {
@@ -633,7 +633,7 @@ void loop() {
             }
         }
         if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
-        if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
+        if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_consumption_x10);
         if (objects.gear_value) lv_label_set_text(objects.gear_value, get_gear_str(active_pkt.gear));
 
         lv_timer_handler();
