@@ -39,7 +39,9 @@ class CANLogCollector:
         if self.mode == "RAW":
             self.csv_writer.writerow(["Timestamp_MS", "CAN_ID_Hex", "RTR", "DLC", "Byte0", "Byte1", "Byte2", "Byte3", "Byte4", "Byte5", "Byte6", "Byte7"])
         else:
-            self.csv_writer.writerow(["ISO_Time", "Uptime_MS", "RPM", "Speed_KMH", "WaterTemp_C", "OilTemp_C", "Battery_V", "Gear", "Fuel_Pct", "Throttle_Pct", "Steering_Deg", "Brake_Bar", "Ambient_C"])
+            self.csv_writer.writerow(["ISO_Time", "Uptime_MS", "RPM", "Speed_KMH", "WaterTemp_C", "OilTemp_C", "Battery_V", "Gear", "Fuel_L100km_x10", "Throttle_Pct", "Steering_Deg", "Brake_Bar", "Ambient_C",
+                                  "Fuel_Level_Pct", "Low_Fuel", "Gear_Num",
+                                  "Cabin_C", "Odo_50m", "Fan", "Lights", "Econ", "Sport"])
 
         print(f"[LogCollector] Writing log to: {self.filepath}")
 
@@ -75,11 +77,23 @@ class CANLogCollector:
                     data.get("oil_temp", 0.0),
                     data.get("battery_v", 0.0),
                     data.get("gear", 0),
-                    data.get("fuel", 0),
+                    # The gateway renamed this on 2026-08-15: the byte is
+                    # instant consumption (x10 L/100km), never tank level.
+                    # Reading "fuel" logged a silent 0 on every row.
+                    data.get("fuel_consumption_x10", 0),
                     data.get("throttle", 0),
                     data.get("steering", 0),
                     data.get("brake", 0),
-                    data.get("ambient", 0)
+                    data.get("ambient", 0),
+                    data.get("fuel_level", -1),
+                    data.get("low_fuel", False),
+                    data.get("gear_num", 0),
+                    data.get("cabin_temp", 0),
+                    data.get("odo_50m", -1),
+                    data.get("fan_speed", 0),
+                    data.get("lights", 0),
+                    data.get("econ", False),
+                    data.get("sport", False)
                 ]
         except Exception:
             pass

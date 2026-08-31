@@ -50,6 +50,7 @@
 #endif
 
 #include <EspDashProto.h>
+#include <EspDashSignals.h>
 #include "can_decode.h"
 
 // =========================================================================
@@ -197,6 +198,10 @@ static volatile uint32_t espnow_send_fail = 0;
 static volatile uint32_t tx_truncated = 0;
 
 // canlog counters, reported by STATS so a lossy capture is visible
+// Last telemetry body actually broadcast, kept purely so SIGNALS can show a
+// live value beside each catalog row. Not used by any control path.
+static EspDashTelemetry  last_wire_telemetry = {};
+
 static volatile uint32_t canlog_batches_sent = 0;
 static volatile uint32_t canlog_frames_sent = 0;
 // Deferred sends, NOT lost data: a batch that cannot go out is held and
@@ -286,9 +291,22 @@ static void apply_demo(CanDecodeState *s, float sim_t) {
     s->speed_kmh_x10   = (uint16_t)(spd_val * 10.0f);
     s->water_temp_x10  = (int16_t)((87.0f + 3.0f * sinf(sim_t * 0.1f)) * 10.0f);
     s->oil_temp_x10    = (int16_t)((92.0f + 4.0f * sinf(sim_t * 0.08f)) * 10.0f);
-    s->battery_mv      = (uint16_t)((13.8f + 0.3f * sinf(sim_t * 0.5f)) * 1000.0f);
+    s->battery_mv      = 0;   // no CAN source: 0x305 b0 retracted 2026-08-29
     s->gear            = gear_idx;
-    s->fuel_consumption_x10 = 85;   // demo: 8.5 L/100km
+    s->fuel_consumption_x10 = 85;   // demo: 8.5 L/100km (trip average)
+    // Sweep the tank slowly from full to the warning lamp and back, so the
+    // low-fuel path on every display node actually gets exercised on a bench.
+    s->fuel_level_pct   = (uint8_t)(50.0f + 50.0f * sinf(sim_t * 0.02f));
+    s->fuel_level_valid = true;
+    s->low_fuel         = s->fuel_level_pct <= 13;
+    s->gear_num         = (uint8_t)(gear_idx == 0 ? 0 : gear_idx);
+    s->econ_on          = ((int)(sim_t / 20.0f) % 2) == 0;
+    s->sport_mode       = false;
+    s->odo_50m          = (uint16_t)(sim_t * 5.0f);   // ~0.9 km/min of "travel"
+    s->odo_valid        = true;
+    s->cabin_temp       = 21;
+    s->fan_speed        = (uint8_t)(1 + ((int)(sim_t / 8.0f) % 5));
+    s->lights           = (uint8_t)(((int)(sim_t / 12.0f)) % 4);
     s->throttle_pct    = throt;
     s->steering_deg    = steer;
     s->ambient_temp    = 23;
@@ -330,6 +348,27 @@ static void process_cmd_string(String cmd) {
         snprintf(buf, sizeof(buf), "[DEMO] Demo Telemetry is now %s\n",
                  demo_mode ? "ENABLED" : "DISABLED");
         broadcast_line(buf);
+    } else if (cmd == "SIGNALS" || cmd == "SIGNALS:LIST") {
+        // The catalog every display node renders from. Printed on request so
+        // a screen can be laid out from the real list rather than from
+        // whatever the docs happened to say - see EspDashSignals.h.
+        char buf[160];
+        snprintf(buf, sizeof(buf), "[SIGNALS] proto v%u.%u, %d signals\n",
+                 ESPDASH_PROTO_MAJOR, ESPDASH_PROTO_MINOR, (int)ESPDASH_SIG_COUNT);
+        broadcast_line(buf);
+        for (int i = 0; i < ESPDASH_SIG_COUNT; i++) {
+            const EspDashSignalInfo *si = espdash_signal_info((EspDashSignalId)i);
+            const char *kind = si->kind == ESPDASH_KIND_FLAG ? "flag"
+                             : si->kind == ESPDASH_KIND_ENUM ? "enum" : "num";
+            char val[24];
+            espdash_signal_format(&last_wire_telemetry, sizeof(EspDashTelemetry),
+                                  (EspDashSignalId)i, 0xFFFF, val, sizeof(val));
+            snprintf(buf, sizeof(buf),
+                     "  %2d %-13s %-9s %-6s %-4s range %d..%d dec %u  now=%s\n",
+                     i, si->key, si->label, si->unit[0] ? si->unit : "-", kind,
+                     (int)si->min_x10, (int)si->max_x10, si->decimals, val);
+            broadcast_line(buf);
+        }
     } else if (cmd == "MODE:GET") {
         char buf[100];
         const char *m = (current_mode == MODE_TELEMETRY) ? "TELEMETRY"
@@ -940,6 +979,24 @@ static void publishTask(void *arg) {
             t->wheel_fr_x10    = snap.wheel_fr_x10;
             t->wheel_rl_x10    = snap.wheel_rl_x10;
             t->wheel_rr_x10    = snap.wheel_rr_x10;
+            t->fuel_level_pct  = snap.fuel_level_pct;
+            t->gear_num        = snap.gear_num;
+            t->odo_50m         = snap.odo_50m;
+            t->cabin_temp      = snap.cabin_temp;
+            t->fan_speed       = snap.fan_speed;
+            t->lights          = snap.lights;
+            t->flags2 = (uint8_t)(
+                (snap.low_fuel         ? ESPDASH_FLAG2_LOW_FUEL   : 0) |
+                (snap.econ_on          ? ESPDASH_FLAG2_ECON       : 0) |
+                (snap.sport_mode       ? ESPDASH_FLAG2_SPORT      : 0) |
+                (snap.turn_left        ? ESPDASH_FLAG2_TURN_LEFT  : 0) |
+                (snap.turn_right       ? ESPDASH_FLAG2_TURN_RIGHT : 0) |
+                (snap.fuel_level_valid ? ESPDASH_FLAG2_FUEL_VALID : 0) |
+                (snap.odo_valid        ? ESPDASH_FLAG2_ODO_VALID  : 0));
+
+            // Keep the last body so the SIGNALS command can print live values
+            // next to the catalog. Written only here, on publishTask.
+            memcpy(&last_wire_telemetry, t, sizeof(last_wire_telemetry));
 
             // peer.channel = 0 makes ESP-NOW follow the station's current
             // channel. With ESPDASH_GATEWAY_WIFI=0 (the default) that channel
@@ -970,6 +1027,9 @@ static void publishTask(void *arg) {
                 "\"fuel_consumption_x10\":%u,\"throttle\":%u,\"steering\":%d,\"brake\":%u,\"abs\":%s,"
                 "\"tc\":%s,\"brake_sw\":%s,\"cel\":%s,\"vsa_warn\":%s,\"w_fl\":%.1f,"
                 "\"w_fr\":%.1f,\"w_rl\":%.1f,\"w_rr\":%.1f,\"ambient\":%d,"
+                "\"fuel_level\":%d,\"low_fuel\":%s,\"gear_num\":%u,"
+                "\"econ\":%s,\"sport\":%s,\"turn_l\":%s,\"turn_r\":%s,"
+                "\"odo_50m\":%d,\"cabin_temp\":%d,\"fan_speed\":%u,\"lights\":%u,"
                 "\"dropped\":%lu,\"timestamp\":%lu}\n",
                 WiFi.macAddress().c_str(),
                 snap.rpm,
@@ -992,6 +1052,19 @@ static void publishTask(void *arg) {
                 snap.wheel_rl_x10 / 10.0f,
                 snap.wheel_rr_x10 / 10.0f,
                 snap.ambient_temp,
+                // -1 rather than 0 when unknown: 0% is a real reading a driver
+                // must be able to trust, so it cannot double as "no data".
+                snap.fuel_level_valid ? (int)snap.fuel_level_pct : -1,
+                snap.low_fuel   ? "true" : "false",
+                snap.gear_num,
+                snap.econ_on    ? "true" : "false",
+                snap.sport_mode ? "true" : "false",
+                snap.turn_left  ? "true" : "false",
+                snap.turn_right ? "true" : "false",
+                snap.odo_valid ? (int)snap.odo_50m : -1,
+                snap.cabin_temp,
+                snap.fan_speed,
+                snap.lights,
                 (unsigned long)raw_dropped,
                 (unsigned long)now);
             broadcast_line(json_buf);

@@ -35,7 +35,7 @@ This directory contains the starter project template matching the current produc
 | `ui_label_speed_val` | Label | (50, 95) | 140 x 45 | Large Digital Speed (`"115"`) | White `#ffffff` (Font 48px / 7-seg) |
 | `ui_label_speed_unit` | Label | (90, 145) | 60 x 14 | Speed Unit (`"KM/H"`) | Muted Grey `#8c8c8c` |
 | `ui_label_temp` | Label | (45, 174) | 50 x 16 | Coolant Temp (`"92°C"`) | Yellow `#ffff00` (Red if >105°C) |
-| `ui_label_fuel` | Label | (95, 174) | 50 x 16 | Fuel Level (`"F:75%"`) | Green `#00ff00` (Red if <=15%) |
+| `ui_label_fuel` | Label | (95, 174) | 50 x 16 | Instant consumption (`"9.4L"` = L/100km). **Not** tank level — that is not on this car's bus, see `docs/CAN_PROTOCOL_MAP.md` §G | Green `#00ff00` (Red if >=12.0 L/100km) |
 | `ui_gear_container` | Badge | (156, 168) | 24 x 24 | Gear Ring Badge | Cyan `#00f0ff` Circle |
 | `ui_label_gear` | Label | (156, 172) | 24 x 16 | Gear Text (`"P"`, `"N"`, `"1"-"6"`) | White `#ffffff` |
 

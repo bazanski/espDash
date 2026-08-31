@@ -8,10 +8,53 @@ gateway over ESP-NOW. No laptop, no Wi-Fi, no USB tether.
 Every capture before this required the web dashboard connected over USB, so
 real driving data only got recorded when planned in advance. The fuel-level
 bug is the cost of that: the light came on at a decoded "43%" and a full tank
-read "56-58%", but there was no raw dump of that drive to diagnose from. The
-fuel curve needs points across a whole tank, the throttle ceiling needs a WOT
-run, and the ignition-bit candidates need clean key cycles — all normal
-driving that was going unrecorded.
+read "56-58%", but there was no raw dump of that drive to diagnose from.
+
+**This has since paid for itself twice.** The 2026-08-15 outing it captured
+proved that byte was instant consumption, not tank level. The 2026-08-29
+session then retuned the throttle ceiling from a real WOT run, moved ambient
+temperature off a byte that was reading −128 °C whenever the climate controls
+were touched, retracted the battery decode, and found the odometer — from
+three and a half minutes of recording. See `CAN_PROTOCOL_MAP.md` §G.
+
+## What to record next
+
+The recorder is most valuable when the drive is *scripted*: one subsystem per
+recording, with the running order written down. The narration is an
+independent oracle the CAN data cannot supply — a byte either moves in exactly
+the recording whose subsystem was touched, or it is not that signal, and the
+ordering ("left indicator first, then right") is what says which bit is which.
+A negative result counts: `canlog_0009` proved central locking and the windows
+are absent from this bus, which closed that question for good.
+
+**The 2026-08-30 session is the model for this.** Six recordings — three on
+the low-fuel lamp, one drive on it, **one of the refuel itself**, one on the
+resulting full tank — solved fuel tank level, the low-fuel lamp, the engaged
+gear, the S gate and ECON mode in a single afternoon. Fuel level had resisted
+three separate analytical searches across two earlier sessions; fifty seconds
+of a running fuel pump settled it beyond argument. See `CAN_PROTOCOL_MAP.md`
+§I, including why the earlier searches failed.
+
+The lesson generalises: **record the transition, don't infer it.** Two sessions
+at different states invite clever reasoning about which byte moved and why. One
+recording of the thing actually changing removes the cleverness, and with it
+the chance of being confidently wrong.
+
+Open items, highest value first:
+
+1. **Trip computer scaling.** One drive, photographing the i-MID readout at
+   the start and at the end. `0x386` and `0x42D` carry trip figures that go
+   all-ones while stationary; the dash numbers would pin their units.
+   Distance-to-empty is *not* among them — the 39–40 km the dash showed on
+   2026-08-30 appears nowhere on the bus, so the cluster computes it itself.
+2. **ABS and traction control.** Still unmapped, and provoking them needs a
+   private surface — full recipe in `CAPTURE_ABS_TC.md`.
+3. **Climate setpoint.** Sweep the temperature dial through its whole range;
+   the 2026-08-29 climate capture only exercised fan speed and modes.
+4. **Gear 5.** Both 2026-08-30 drives were urban and never went past 4th, so
+   the top of the gear ladder is inferred rather than observed. Any motorway
+   run closes it.
+5. **Clean key cycles**, for the ignition-bit candidates.
 
 ## Using it
 

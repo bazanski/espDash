@@ -185,19 +185,34 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
         else hit = false;
         break;
 
-    // 0x324 - coolant temp and instant fuel consumption. opendbc labels this
+    // 0x324 - coolant temp and TRIP-AVERAGE fuel consumption. opendbc labels this
     // CRUISE/HUD_SPEED_KPH, but that would mean 125 km/h on a stationary car;
     // coolant is dash-verified and gives 85-92 C on the Si trace.
     //
     // byte1 was originally decoded as fuel level % (d[1]/2) and marked
     // CONFIRMED. That was wrong, not just noisy: a 49-min real outing with no
     // refuel had the dash reading >90% -> >80% while this formula sat at
-    // 41-52% throughout, under any linear scale of the byte. Binned by speed
-    // the byte is smooth and monotonic instead - 92.4 raw at 0-10 km/h down
-    // to 80.0 at 90-100 km/h, ~zero correlation with short-term acceleration
-    // - the signature of instant consumption, not tank level. The raw byte
-    // IS the value, x10 L/100km (94 -> 9.4); no division needed. See
-    // docs/CAN_PROTOCOL_MAP.md for the full writeup. Tank level is unmapped.
+    // 41-52% throughout, under any linear scale of the byte. Tank level is not
+    // on this bus at all - ruled out exhaustively on 2026-08-29 against a 10%
+    // tank (docs/CAN_PROTOCOL_MAP.md section G).
+    //
+    // UNITS: the raw byte IS the value, x10 L/100km (94 -> 9.4). Not km/L.
+    // Settled 2026-08-29 by 10 minutes of idling in Park, engine running, car
+    // never moving: the byte climbs 89 -> 98. Burning fuel while covering zero
+    // distance drags a trip-average L/100km upward, which is exactly that. The
+    // km/L reading would mean efficiency IMPROVING from 8.9 to 9.8 km/L while
+    // stationary, which is impossible.
+    //
+    // AVERAGE, NOT INSTANT: this was called instant consumption on the
+    // strength of a speed-binned correlation. That correlation was a time
+    // artifact - the slow bins came early in the trip and the fast ones later.
+    // Two deliberate wide-open-throttle pulls to the rev limiter move this
+    // byte by ONE count (canlog_0005), and across the 37-min drive it traces a
+    // textbook trip average: 9.4 cold at zero distance, improving to 8.0 by
+    // 24 km of motorway, then back up to 8.7 as the drive slowed into town.
+    // An instantaneous reading would swing with every throttle input and go to
+    // its maximum whenever the car stopped. Callers wanting a live figure must
+    // compute one; this byte cannot provide it.
     case 0x324:
         if (dlc >= 2) {
             if (d[0] > 0) {
@@ -233,28 +248,152 @@ bool can_decode_frame(CanDecodeState *st, const CanFrame *f, uint32_t now_ms) {
             }
             if (hit) touch(st, SIG_GEAR, now_ms);
         } else hit = false;
+        // Byte 0 is the ENGAGED gear, distinct from the selector in byte 3.
+        // Confirmed by rpm-per-km/h, which forms a clean ratio ladder across
+        // an 886 s drive - 113 / 62 / 42 / 28 for gears 1-4, i.e. steps of
+        // 1.83, 1.47, 1.49. Value 7 has 40% scatter and is the shift /
+        // converter-unlocked transient, not a gear. The ladder holds in both
+        // D and S, so manual shifts in the S gate are fully visible.
+        if (dlc >= 5) {
+            st->gear_num = (d[0] >= 1 && d[0] <= 5) ? d[0] : 0;
+            st->sport_mode = (d[4] & 0x10) != 0;   // S gate; b2 is 0x08 vs 0x80
+        }
         break;
 
-    // 0x21E byte 4 - ambient air temperature, direct degrees C.
+    // 0x1A6 byte 3 - FUEL TANK LEVEL. The signal this project hunted for
+    // across four sessions, found on 2026-08-30 by recording an actual
+    // refuel: over 42 s of pumping the byte climbs smoothly 40 -> 105, stops
+    // dead the moment the pump does, and then sits at exactly 105 for a
+    // 512 s drive on the full tank (sd 0.24, float against its upper stop).
+    // Every dash reading ever noted lines up against raw/105:
+    //   2026-08-15 ">90%" -> 89%      2026-08-15 ">80%" -> 81%
+    //   2026-08-29 "~10%" -> 17%      2026-08-30 lamp lit -> 13%
+    //   2026-08-30 "full" -> 100%
+    //
+    // The byte is half-litres, so one count is also one percent of the
+    // nominal 50 L tank and no scaling is needed - see can_decode.h. The
+    // ceiling of 105 is a brimmed tank (52.5 L, filler neck included), which
+    // is why the dash needle sits above F right after a fill. Clamped to 100
+    // for display only.
+    //
+    // Byte 4 moves opposite to byte 3 but is NOT its complement (the sums
+    // drift), so it is left alone rather than guessed at.
+    //
+    // Why this took so long: the float sloshes. Driving, byte 3 swings +-8
+    // counts around the true level, so every "find the byte that changes
+    // smoothly/monotonically" search discarded it as noise. Sloshing IS the
+    // signature of a real float gauge - see CAN_PROTOCOL_MAP.md section I.
+    case 0x1A6:
+        if (dlc >= 4) {
+            st->fuel_level_pct = (uint8_t)clamp_i((int)d[3], 0, 100);
+            st->fuel_level_valid = true;
+            touch(st, SIG_FUEL_LEVEL, now_ms);
+            // Byte 0 low two bits are the headlight switch position. The
+            // scripted lights capture ramps 0->1->2->3 and back down, exactly
+            // matching DRL -> position -> low -> high -> off in reverse. The
+            // HIGH bits of the same byte pulse for 140-200 ms per
+            // steering-wheel button press, which is why only 0x03 is masked.
+            st->lights = (uint8_t)(d[0] & 0x03);
+        } else hit = false;
+        break;
+
+    // 0x294 byte 0 - instrument-cluster telltales. Bit 0 is the low-fuel
+    // lamp, corroborated independently by 0x405 b0 bit 2 (both agree across
+    // every capture). The tight test it had to pass: on 2026-08-29 the tank
+    // read 17% with the lamp NOT yet lit, and on 2026-08-30 it read 13% with
+    // the lamp LIT - only three raw counts apart. Bits that merely track the
+    // level byte fail that; these two do not.
+    // Bits 5/6 are the turn-signal stalk, ordered left-then-right against a
+    // scripted capture.
+    case 0x294:
+        if (dlc >= 1) {
+            st->low_fuel   = (d[0] & 0x01) != 0;
+            st->turn_left  = (d[0] & 0x20) != 0;
+            st->turn_right = (d[0] & 0x40) != 0;
+        } else hit = false;
+        break;
+
+    // 0x221 byte 2 bit 7 - ECON mode. One 78 s OFF window in an 886 s drive,
+    // matching a test where ECON was switched off mid-drive and back on.
+    case 0x221:
+        if (dlc >= 3) {
+            st->econ_on = (d[2] & 0x80) != 0;
+        } else hit = false;
+        break;
+
+    // 0x377 bytes 1-2 - DISTANCE TRAVELLED, 50 m per count.
+    // Calibrated against speed integrated over a 37.8 km drive: 758 counts,
+    // 49.81 m/count, residual under 1.1 counts (55 m) across 38 samples an
+    // hour apart; independently 48.7 m/count on a second log. Frozen while
+    // idling in Park. It is 16-bit and wraps every 3276 km, so it is a
+    // DELTA source, not an odometer reading - see EspDashProto.h.
+    case 0x377:
+        if (dlc >= 3) {
+            st->odo_50m = be16(d, 1);
+            st->odo_valid = true;
+            touch(st, SIG_ODO, now_ms);
+        } else hit = false;
+        break;
+
+    // 0x510 byte 1 - blower fan speed. Constant 5 in every capture except the
+    // scripted climate test, where it steps 5-1-5-1-5-4-3-2-5 exactly while
+    // the dial was being turned. Honda's dial goes to 7; 1-5 were exercised.
+    // Byte 0 (0x58/0x54/0x4C) is the mode/distribution dial - only three
+    // positions were seen, not enough to map, so it stays undecoded.
+    case 0x510:
+        if (dlc >= 2) {
+            st->fan_speed = (d[1] <= 7) ? d[1] : 0;
+        } else hit = false;
+        break;
+
+    // 0x21E byte 3 - ambient air temperature, offset by 40 (0x49 -> 33 C).
+    //
+    // This was byte 4 read as a direct signed degree count, which survived
+    // only because 0x20 = 32 happened to sit next to a 32 C day. Byte 4 is a
+    // bitfield: cycling the climate controls (canlog_0006) drives it through
+    // 0x00/0x21/0x60/0x80/0x81/0xA0 - i.e. -128 C to +96 C on the gauge - and
+    // in the 37-min road log it steps cleanly from 0x20 to 0x60 mid-drive and
+    // stays there. Byte 3 behaves like a real sensor instead: 0x47-0x49 over
+    // that same drive (31-33 C, drifting down as the evening cools) and 0x49
+    // on 2026-08-29, when the dash read exactly 33 C.
+    //
+    // Byte 2 is a second temperature on the same offset (19-24 C over the
+    // drive, falling as the cabin cools) - in-car temperature, not decoded
+    // here because it has nowhere to go in the wire protocol yet.
+    //
     // 0x372 is NOT an alternative source: it is DLC 2 whose byte 1 is pure
     // counter+checksum, and whose byte 0 only ever takes {0, 32} even during
     // a drive - a flag (0x20) that coincidentally matched a 32 C reading.
     case 0x21E:
-        if (dlc >= 5) {
-            st->ambient_temp = (int8_t)d[4];
-            touch(st, SIG_AMBIENT, now_ms);
+        if (dlc >= 4) {
+            int t = (int)d[3] - 40;
+            if (t > -50 && t < 90) {
+                st->ambient_temp = (int8_t)t;
+                touch(st, SIG_AMBIENT, now_ms);
+            }
+            // Byte 2 is a second sensor on the same -40 offset: 24 -> 19 C
+            // over a 37-min drive as the cabin cooled, 18-19 C on a 33 C day.
+            int c = (int)d[2] - 40;
+            if (c > -50 && c < 90) st->cabin_temp = (int8_t)c;
         } else hit = false;
         break;
 
-    // 0x305 byte 0 - 12V battery, 100 mV per count. Dash-verified at 14.2 V.
-    case 0x305:
-        if (dlc >= 1) {
-            if (d[0] >= 50 && d[0] <= 200) {
-                st->battery_mv = (uint16_t)(d[0] * 100);
-                touch(st, SIG_BATTERY, now_ms);
-            }
-        } else hit = false;
-        break;
+    // 0x305 is NOT battery voltage - retracted 2026-08-29, left inert.
+    //
+    // Byte 0 was read as 100 mV per count on the strength of one number: it
+    // reads 0x8E = 142 = "14.2 V". But it reads exactly 142 in every
+    // stationary capture weeks apart (2026-08-06, 2026-08-08, and all five
+    // 2026-08-29 recordings across 10 minutes of idling) - never 141, never
+    // 143. A real alternator rail wanders with load; this does not vary at
+    // all. And across the 37-min drive it sat at 0x06 and 0x0E, i.e. 0.6 V
+    // and 1.4 V, which no running car produces.
+    //
+    // The values are bit patterns, not a measurement: 0x8E/0x4E/0x0E/0x06
+    // share a low nibble and differ in bits 6-7, and byte 1 moves between
+    // 0xA8 and 0x14 the same way. opendbc calls this ID SEATBELT_STATUS,
+    // which fits a flag that is set while parked with the belt off and clear
+    // while driving. Battery voltage has no known source on this bus, so the
+    // gauge now reads nothing rather than a constant fiction.
 
     default:
         hit = false;

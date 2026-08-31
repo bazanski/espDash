@@ -21,6 +21,7 @@
 // copy of the struct in here: that is exactly how the gateway and this node
 // drifted apart before.
 #include <EspDashProto.h>
+#include <EspDashSignals.h>
 
 static EspDashTelemetry current_pkt = {0};
 static uint16_t  current_payload_len = 0;   // what the sender actually sent
@@ -196,6 +197,16 @@ static const char* get_gear_str(uint8_t g) {
 // DRAW GAUGES ON 240x240 CIRCULAR DISPLAY SPRITE
 // =========================================================================
 void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
+    // What the sender actually sent, so the catalog can report "--" for a
+    // signal this gateway is too old to carry rather than showing a zero.
+    const uint16_t plen = current_payload_len ? current_payload_len
+                                              : (uint16_t)sizeof(EspDashTelemetry);
+    // First odometer reading seen this power-on. ESPDASH_SIG_ODO_KM is a
+    // trip distance measured from here, because the wire counter is 16-bit
+    // and wraps every 3276 km - an absolute value would be meaningless.
+    static uint16_t odo_base = 0xFFFF;
+    if (odo_base == 0xFFFF && (pkt.flags2 & ESPDASH_FLAG2_ODO_VALID)) odo_base = pkt.odo_50m;
+
     spr.fillSprite(COLOR_BG);
 
     const int cx = 120;
@@ -298,39 +309,58 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
     spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
     spr.drawString("KM/H", cx, cy + 32);
 
-    // 7. Coolant Temp Badge (Bottom Left)
-    float waterC = pkt.water_temp_x10 / 10.0f;
-    bool isOverheat = waterC > 105.0f;
-    spr.setTextColor(isOverheat ? COLOR_RED : COLOR_YELLOW, COLOR_BG);
-    spr.setTextDatum(MC_DATUM);
-    spr.drawString(String((int)waterC) + "°C", cx - 48, cy + 62);
+    // 7. Configurable bottom row - THREE SLOTS, DRIVEN BY THE CATALOG.
+    //
+    // To change what this display shows, edit kBottomRow below. Nothing else
+    // in this file, in the gateway, or in the wire protocol needs to change:
+    // the catalog supplies the label, the unit, the number of decimals and
+    // the "--" fallback when the gateway is too old to send that signal.
+    // Every value the car broadcasts is already in the packet whether or not
+    // a screen renders it, which is the whole point.
+    //
+    // Try: ESPDASH_SIG_ODO_KM, ESPDASH_SIG_CABIN_TEMP, ESPDASH_SIG_FAN_SPEED,
+    //      ESPDASH_SIG_LIGHTS, ESPDASH_SIG_GEAR_NUM, ESPDASH_SIG_FUEL_LITRES,
+    //      ESPDASH_SIG_FUEL_AVG, ESPDASH_SIG_WHEEL_FL ... see EspDashSignals.h
+    static const EspDashSignalId kBottomRow[3] = {
+        ESPDASH_SIG_COOLANT,
+        ESPDASH_SIG_FUEL_LEVEL,
+        ESPDASH_SIG_GEAR,
+    };
+    const int slot_x[3] = { cx - 48, cx, cx + 48 };
 
-    // 8. Fuel Level Badge (Bottom Center)
-    uint8_t fuel = pkt.fuel_pct;
-    bool isLowFuel = fuel <= 15;
-    spr.setTextColor(isLowFuel ? COLOR_RED : COLOR_GREEN, COLOR_BG);
     spr.setTextDatum(MC_DATUM);
-    spr.drawString("F:" + String(fuel) + "%", cx, cy + 62);
+    for (int i = 0; i < 3; i++) {
+        const EspDashSignalInfo *si = espdash_signal_info(kBottomRow[i]);
+        if (!si) continue;
+        char txt[24];
+        espdash_signal_format(&pkt, plen, kBottomRow[i], odo_base, txt, sizeof(txt));
 
-    // 9. Gear Indicator Badge (Bottom Right)
-    const char* gearStr = "N";
-    switch(pkt.gear) {
-        case 0: gearStr = "P"; break;
-        case 1: gearStr = "R"; break;
-        case 2: gearStr = "N"; break;
-        case 3: gearStr = "D"; break;
-        case 4: gearStr = "S"; break;
-        case 5: gearStr = "1"; break;
-        case 6: gearStr = "2"; break;
-        case 7: gearStr = "3"; break;
-        case 8: gearStr = "4"; break;
-        case 9: gearStr = "5"; break;
-        case 10: gearStr = "6"; break;
-        default: gearStr = "D"; break;
+        // Colour is the one thing the catalog deliberately does NOT own: a
+        // warning threshold is a judgement about this car, not a property of
+        // the number. Kept here, and keyed off the car's own telltales where
+        // it has them rather than a percentage we invented.
+        uint16_t col = COLOR_TEXT_MUT;
+        if (strcmp(txt, "--") != 0) {
+            col = COLOR_WHITE;
+            switch (kBottomRow[i]) {
+                case ESPDASH_SIG_COOLANT:
+                    col = (pkt.water_temp_x10 > 1050) ? COLOR_RED : COLOR_YELLOW;
+                    break;
+                case ESPDASH_SIG_FUEL_LEVEL:
+                case ESPDASH_SIG_FUEL_LITRES:
+                    col = (pkt.flags2 & ESPDASH_FLAG2_LOW_FUEL) ? COLOR_RED : COLOR_GREEN;
+                    break;
+                case ESPDASH_SIG_GEAR:
+                    col = COLOR_CYAN;
+                    break;
+                default: break;
+            }
+        }
+        spr.setTextColor(col, COLOR_BG);
+        spr.drawString(String(txt) + si->unit, slot_x[i], cy + 62);
+        spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
+        spr.drawString(si->label, slot_x[i], cy + 76);
     }
-    spr.drawCircle(cx + 48, cy + 62, 12, COLOR_CYAN);
-    spr.setTextColor(COLOR_WHITE, COLOR_BG);
-    spr.drawString(gearStr, cx + 48, cy + 62);
 
     // 9. Top Status Badge - link state, never a silent fake
     const char *badge;
@@ -354,10 +384,14 @@ void render_gauge_ui(const EspDashTelemetry &pkt, LinkState link) {
         spr.setTextColor(COLOR_TEXT_MUT, COLOR_BG);
         spr.drawString("ch " + String(espnow_channel), cx, 30);
     } else if (link != LINK_SEARCHING) {
-        float battV = pkt.battery_mv / 1000.0f;
-        bool lowBatt = battV > 0.0f && battV < 12.0f;
+        // battery_mv is 0 until a real source is found: 0x305 byte 0 was
+        // retracted on 2026-08-29 (a bitfield stuck at "14.2 V", not a
+        // measurement). Draw a blank rather than a confident 0.0 V.
+        uint16_t mv = pkt.battery_mv;
+        float battV = mv / 1000.0f;
+        bool lowBatt = mv > 0 && battV < 12.0f;
         spr.setTextColor(lowBatt ? COLOR_RED : COLOR_TEXT_MUT, COLOR_BG);
-        spr.drawString(String(battV, 1) + "V", cx, 30);
+        spr.drawString(mv ? String(battV, 1) + "V" : String("--.-V"), cx, 30);
     }
 
     // Push Sprite to Screen
@@ -570,8 +604,11 @@ void loop() {
         active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
         active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
         active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.fuel_pct = (uint8_t)(75 + sin(phase * 0.1f) * 20);
-        active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000); // Dynamic 11.2V - 14.8V sweep
+        active_pkt.fuel_consumption_x10 = (uint8_t)(95 + sin(phase * 0.1f) * 25); // 7.0-12.0 L/100km
+        active_pkt.fuel_level_pct = (uint8_t)(50 + sin(phase * 0.05f) * 50);
+        active_pkt.flags2 = ESPDASH_FLAG2_FUEL_VALID |
+                            (active_pkt.fuel_level_pct <= 13 ? ESPDASH_FLAG2_LOW_FUEL : 0);
+        active_pkt.battery_mv = 0;   // no CAN source - see EspDashProto.h
         active_pkt.gear = (uint8_t)(5 + ((int)(now * 0.0004f) % 6));
     } else {
         active_pkt = current_pkt;
@@ -633,7 +670,12 @@ void loop() {
             }
         }
         if (objects.coolant_temp_value) lv_label_set_text_fmt(objects.coolant_temp_value, "%d°C", active_pkt.water_temp_x10 / 10);
-        if (objects.fuel_level_value) lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_pct);
+        if (objects.fuel_level_value) {
+            if (active_pkt.flags2 & ESPDASH_FLAG2_FUEL_VALID)
+                lv_label_set_text_fmt(objects.fuel_level_value, "F:%d%%", active_pkt.fuel_level_pct);
+            else
+                lv_label_set_text(objects.fuel_level_value, "F: --%");
+        }
         if (objects.gear_value) lv_label_set_text(objects.gear_value, get_gear_str(active_pkt.gear));
 
         lv_timer_handler();

@@ -516,8 +516,8 @@ void loop() {
                     sin(phase * 0.8f) * 20) *
                    10); // 15 - 120 km/h sweep
     active_pkt.water_temp_x10 = 920;
-    active_pkt.fuel_pct = 82;
-    active_pkt.battery_mv = 13800;
+    active_pkt.fuel_consumption_x10 = 82;
+    active_pkt.battery_mv = 0;   // no CAN source: 0x305 b0 retracted 2026-08-29
     active_pkt.gear = (uint8_t)(1 + ((int)(now * 0.0004f) % 6));
   } else {
     active_pkt = current_pkt;

@@ -29,7 +29,11 @@
 
 #define ESPDASH_MAGIC       0xED
 #define ESPDASH_PROTO_MAJOR 2
-#define ESPDASH_PROTO_MINOR 1
+// Minor 2 was claimed by an unmerged branch (feature/xiao-dual-round-gauge)
+// for a different field at this same offset. Skipping straight to 3 keeps the
+// promise that a version number identifies exactly one layout - which is the
+// entire point of the rules above.
+#define ESPDASH_PROTO_MINOR 4
 
 // Fixed 2.4 GHz channel for ESP-NOW when a device never associates to Wi-Fi.
 // Only channels 1/6/11 are non-overlapping (WiFi channels are ~22 MHz wide on
@@ -85,6 +89,26 @@ typedef struct __attribute__((packed)) {
     uint16_t wheel_fr_x10;
     uint16_t wheel_rl_x10;
     uint16_t wheel_rr_x10;
+    // ---- added in v2.3 --------------------------------------------------
+    uint8_t  fuel_level_pct;  // TANK LEVEL, 0-100 %. Found 2026-08-30 by
+                              // recording an actual refuel: 0x1A6 byte 3
+                              // climbs 40 -> 105 while the pump runs and
+                              // pins at 105 on a full tank. 105 = full.
+                              // 0 also means "no reading yet" - gate on
+                              // ESPDASH_FLAG2_FUEL_VALID, not on != 0.
+    uint8_t  gear_num;        // engaged gear 1-5, 0 = none/neutral/shifting.
+                              // The `gear` field above is the SELECTOR
+                              // (P/R/N/D/S); this is what the box is in.
+    uint8_t  flags2;          // see ESPDASH_FLAG2_* below
+    // ---- added in v2.4 --------------------------------------------------
+    // Everything else this car broadcasts that we have decoded. Sent whether
+    // or not any node renders it, so a display can be re-laid-out without
+    // touching gateway firmware - see EspDashSignals.h.
+    uint16_t odo_50m;         // distance, 50 m per count. 16-bit: WRAPS every
+                              // 3276 km. Take deltas; never show as a total.
+    int8_t   cabin_temp;      // in-car temperature, whole degrees C
+    uint8_t  fan_speed;       // blower 0-7
+    uint8_t  lights;          // 0=DRL 1=position 2=low beam 3=high beam
 } EspDashTelemetry;
 
 // Flag bits. Keep in sync with the JSON booleans the web dashboard reads.
@@ -96,6 +120,15 @@ typedef struct __attribute__((packed)) {
 #define ESPDASH_FLAG_BRAKE_SWITCH   0x20
 #define ESPDASH_FLAG_CEL            0x40  // UNMAPPED
 #define ESPDASH_FLAG_VSA_WARNING    0x80
+
+// Second flag byte, added in v2.3 because the first was full.
+#define ESPDASH_FLAG2_LOW_FUEL      0x01  // the dash low-fuel lamp is lit
+#define ESPDASH_FLAG2_ECON          0x02  // ECON mode engaged
+#define ESPDASH_FLAG2_SPORT         0x04  // gearbox in the S (manual) gate
+#define ESPDASH_FLAG2_TURN_LEFT     0x08
+#define ESPDASH_FLAG2_TURN_RIGHT    0x10
+#define ESPDASH_FLAG2_FUEL_VALID    0x20  // fuel_level_pct carries a reading
+#define ESPDASH_FLAG2_ODO_VALID     0x40  // odo_50m carries a reading
 
 // True when the sender's payload was long enough to contain `field`.
 // Usage: if (ESPDASH_HAS(hdr->payload_len, wheel_fl_x10)) { ... }
@@ -123,8 +156,10 @@ static_assert(offsetof(EspDashTelemetry, flags)           == 15, "v2.0 layout fr
 static_assert(offsetof(EspDashTelemetry, throttle_pct)    == 16, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, brake_pct)       == 17, "v2.0 layout frozen");
 static_assert(offsetof(EspDashTelemetry, timestamp_ms)    == 18, "v2.0 layout frozen");
-// Appended in v2.1. Bump this deliberately when you append more.
-static_assert(sizeof(EspDashTelemetry) == 30, "size changed - bump PROTO_MINOR");
+// Appended in v2.1 and v2.3. Bump this deliberately when you append more.
+static_assert(sizeof(EspDashTelemetry) == 38, "size changed - bump PROTO_MINOR");
+static_assert(offsetof(EspDashTelemetry, fuel_level_pct) == 30, "v2.3 layout");
+static_assert(offsetof(EspDashTelemetry, odo_50m) == 33, "v2.4 layout");
 #endif
 
 // Validate a received ESP-NOW buffer. Returns a pointer to the telemetry body

@@ -16,6 +16,7 @@
 #include <math.h>
 
 #include "can_decode.h"
+#include "EspDashSignals.h"
 
 #ifndef FIXTURE_DIR
 #define FIXTURE_DIR "test/fixtures"
@@ -37,6 +38,10 @@ typedef struct {
     float fuel_min, fuel_max;
     float batt_min, batt_max;
     int   ambient_min, ambient_max;
+    int   fuel_lvl_min, fuel_lvl_max;
+    int   low_fuel_true, low_fuel_n;
+    uint8_t gear_num_max;
+    int   sport_true, econ_true;
     uint8_t brake_min, brake_max;
     uint8_t throttle_max;
     int   wheels_moving_true, wheels_moving_n;
@@ -54,6 +59,7 @@ static void stats_init(ReplayStats *s) {
     s->fuel_min = 1e9f; s->fuel_max = -1e9f;
     s->batt_min = 1e9f; s->batt_max = -1e9f;
     s->ambient_min = 127; s->ambient_max = -128;
+    s->fuel_lvl_min = 999; s->fuel_lvl_max = -1;
     s->brake_min = 255;
 }
 
@@ -145,6 +151,17 @@ static bool replay(const char *name, ReplayStats *out, bool moving_only) {
             if (st.ambient_temp < out->ambient_min) out->ambient_min = st.ambient_temp;
             if (st.ambient_temp > out->ambient_max) out->ambient_max = st.ambient_temp;
         }
+        if (st.fuel_level_valid) {
+            if (st.fuel_level_pct < out->fuel_lvl_min) out->fuel_lvl_min = st.fuel_level_pct;
+            if (st.fuel_level_pct > out->fuel_lvl_max) out->fuel_lvl_max = st.fuel_level_pct;
+        }
+        if (f.id == 0x294) {
+            out->low_fuel_n++;
+            if (st.low_fuel) out->low_fuel_true++;
+        }
+        if (st.gear_num > out->gear_num_max) out->gear_num_max = st.gear_num;
+        if (st.sport_mode) out->sport_true++;
+        if (st.econ_on) out->econ_true++;
         if (st.brake_pct < out->brake_min) out->brake_min = st.brake_pct;
         if (st.brake_pct > out->brake_max) out->brake_max = st.brake_pct;
         if (st.throttle_pct > out->throttle_max) out->throttle_max = st.throttle_pct;
@@ -285,12 +302,16 @@ static void test_user_2014_capture_regression(void) {
     // consumption x10 L/100km - a plausible idle-range reading (10.1-10.2),
     // not a claim this fixture proves the formula, only a regression guard.
     TEST_ASSERT_TRUE(s.fuel_min >= 100.0f && s.fuel_max <= 103.0f);
-    TEST_ASSERT_TRUE(s.batt_min >= 14.0f && s.batt_max <= 14.4f);
+    // Battery voltage is no longer decoded: 0x305 byte 0 is a bitfield that
+    // happens to equal 142 while parked (see can_decode.cpp). Nothing may set
+    // it, so the min/max sentinels must come back untouched.
+    TEST_ASSERT_EQUAL_FLOAT(1e9f, s.batt_min);
 
-    // Ambient now comes from 0x21E byte 4 only. 0x372 is a flag, not a
+    // Ambient now comes from 0x21E byte 3 with a -40 offset. This fixture
+    // carries 0x49 throughout, and the dash read 33 C. 0x372 is a flag, not a
     // temperature, and must no longer be able to overwrite this.
-    TEST_ASSERT_EQUAL_INT(32, s.ambient_min);
-    TEST_ASSERT_EQUAL_INT(32, s.ambient_max);
+    TEST_ASSERT_EQUAL_INT(33, s.ambient_min);
+    TEST_ASSERT_EQUAL_INT(33, s.ambient_max);
 
     // Engine was revved but the car never moved.
     TEST_ASSERT_TRUE(s.rpm_max > 4500 && s.rpm_max < 5500);
@@ -302,6 +323,162 @@ static void test_user_2014_capture_regression(void) {
 // =========================================================================
 // Regressions for the specific bugs found
 // =========================================================================
+// =========================================================================
+// This car: the 2026-08-29 wide-open-throttle capture
+// =========================================================================
+static void test_wot_pedal_scale(void) {
+    ReplayStats s;
+    TEST_ASSERT_TRUE(replay("civic9_user_2014_wot.txt", &s, false));
+    TEST_ASSERT_EQUAL_UINT32(0, s.rejects);
+
+    printf("\n  [this car WOT] rpm %u-%u  throttle max %u%%  ambient %d-%d C\n",
+           s.rpm_min, s.rpm_max, s.throttle_max, s.ambient_min, s.ambient_max);
+
+    // Two full-throttle pulls into the limiter, in Park.
+    TEST_ASSERT_TRUE_MESSAGE(s.rpm_max > 5000 && s.rpm_max < 5600,
+                             "capture should reach the rev limiter");
+
+    // The whole point of the fixture. Raw 0x17C b0 plateaus at 211-213 here,
+    // so on a 0-255 scale the pedal reads 83-84 % - the kickdown detent, with
+    // the remaining travel only reachable by pushing through it (the road log
+    // gets to 255). The retired 139.0f scale turned this into a clipped 100 %,
+    // and would have done so from raw 139 upward - just 55 % of real travel.
+    TEST_ASSERT_TRUE_MESSAGE(s.throttle_max >= 80 && s.throttle_max <= 88,
+                             "WOT should read low-80s %, not clip at 100");
+
+    // Ambient from 0x21E byte 3: the dash read 33 C that day.
+    TEST_ASSERT_EQUAL_INT(33, s.ambient_max);
+
+    // 0x324 byte 1 is a TRIP AVERAGE, not an instantaneous reading. Two pulls
+    // to the rev limiter in this very capture move it by a single count. If a
+    // future change ever makes this byte swing with throttle, it has stopped
+    // being decoded as what it is - see CAN_PROTOCOL_MAP.md section H.
+    TEST_ASSERT_TRUE_MESSAGE(s.fuel_max - s.fuel_min <= 2.0f,
+                             "0x324 b1 must barely move under WOT - it is an average");
+    TEST_ASSERT_TRUE_MESSAGE(s.fuel_min >= 85.0f && s.fuel_max <= 95.0f,
+                             "raw byte is the value, x10 L/100km - no km/L conversion");
+
+    // Stationary throughout - the car never left Park.
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, s.wheel_max[i]);
+    }
+}
+
+// =========================================================================
+// Fuel tank level - the two ends of the gauge, from real captures
+// =========================================================================
+static void test_fuel_level_refuel(void) {
+    ReplayStats s;
+    TEST_ASSERT_TRUE(replay("civic9_user_2014_refuel.txt", &s, false));
+    TEST_ASSERT_EQUAL_UINT32(0, s.rejects);
+    printf("\n  [refuel] fuel level swept %d%% -> %d%%\n", s.fuel_lvl_min, s.fuel_lvl_max);
+
+    // Caught mid-fill: 0x1A6 b3 runs 40 -> 105 raw, i.e. 38% -> 100%.
+    TEST_ASSERT_TRUE_MESSAGE(s.fuel_lvl_min >= 35 && s.fuel_lvl_min <= 42,
+                             "refuel should start around 38%");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(100, s.fuel_lvl_max,
+                             "a full tank must read exactly 100% - check FUEL_LEVEL_FULL_RAW");
+    // The lamp was already out at 38%; it must not be asserted anywhere here.
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, s.low_fuel_true,
+                             "low-fuel lamp must be off above the warning threshold");
+}
+
+static void test_fuel_level_low_and_lamp(void) {
+    ReplayStats s;
+    TEST_ASSERT_TRUE(replay("civic9_user_2014_lowfuel.txt", &s, false));
+    TEST_ASSERT_EQUAL_UINT32(0, s.rejects);
+    printf("  [low fuel] level %d-%d%%, lamp asserted on %d/%d frames of 0x294\n",
+           s.fuel_lvl_min, s.fuel_lvl_max, s.low_fuel_true, s.low_fuel_n);
+
+    // Dash had the low-fuel lamp lit and showed 39-40 km to empty.
+    TEST_ASSERT_TRUE_MESSAGE(s.fuel_lvl_max <= 16, "near-empty tank must read low");
+    TEST_ASSERT_TRUE_MESSAGE(s.fuel_lvl_min >= 8, "...but not zero - the lamp lights with reserve left");
+    TEST_ASSERT_TRUE_MESSAGE(s.low_fuel_n > 0, "fixture must contain 0x294");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(s.low_fuel_n, s.low_fuel_true,
+                             "the lamp was lit for this entire capture");
+}
+
+// =========================================================================
+// The signal catalog: screens are laid out from this table, so a row that
+// does not line up with its enum silently mislabels a gauge.
+// =========================================================================
+static void test_signal_catalog_is_consistent(void) {
+    EspDashTelemetry t;
+    memset(&t, 0, sizeof(t));
+    const uint16_t plen = (uint16_t)sizeof(t);
+
+    for (int i = 0; i < ESPDASH_SIG_COUNT; i++) {
+        const EspDashSignalInfo *si = espdash_signal_info((EspDashSignalId)i);
+        TEST_ASSERT_NOT_NULL(si);
+        TEST_ASSERT_NOT_NULL(si->key);
+        TEST_ASSERT_NOT_NULL(si->label);
+        TEST_ASSERT_NOT_NULL(si->unit);
+        TEST_ASSERT_TRUE_MESSAGE(si->key[0] != '\0', "every signal needs a key");
+        TEST_ASSERT_TRUE_MESSAGE(si->max_x10 > si->min_x10, "gauge range must be non-empty");
+        TEST_ASSERT_TRUE_MESSAGE(si->decimals <= 1, "only 0 or 1 decimals are formatted");
+        if (si->kind == ESPDASH_KIND_ENUM) {
+            TEST_ASSERT_NOT_NULL_MESSAGE(si->labels, "enum signal needs labels");
+            TEST_ASSERT_TRUE(si->label_count > 0);
+        }
+        // Lookup by key must land back on the same id, or a layout driven by
+        // strings would silently render a different signal.
+        TEST_ASSERT_EQUAL_INT_MESSAGE(i, (int)espdash_signal_by_key(si->key),
+                                      "key lookup must round-trip");
+        // Must never write past the buffer or leave it unterminated.
+        char buf[8];
+        int n = espdash_signal_format(&t, plen, (EspDashSignalId)i, 0xFFFF, buf, sizeof(buf));
+        TEST_ASSERT_TRUE(n >= 0);
+        TEST_ASSERT_TRUE(strlen(buf) < sizeof(buf));
+    }
+    // Unknown keys must be rejected, not fall through to signal 0.
+    TEST_ASSERT_EQUAL_INT((int)ESPDASH_SIG_COUNT, (int)espdash_signal_by_key("nope"));
+    TEST_ASSERT_EQUAL_INT((int)ESPDASH_SIG_COUNT, (int)espdash_signal_by_key(NULL));
+}
+
+static void test_signal_catalog_gates_on_payload_len(void) {
+    // A node built against this catalog must show "--" for a field an older
+    // gateway does not send - never a zero that reads as a real measurement.
+    EspDashTelemetry t;
+    memset(&t, 0, sizeof(t));
+    t.fuel_level_pct = 42;
+    t.flags2 = ESPDASH_FLAG2_FUEL_VALID;
+    char buf[16];
+    bool ok = false;
+
+    espdash_signal_x10(&t, (uint16_t)sizeof(t), ESPDASH_SIG_FUEL_LEVEL, 0xFFFF, &ok);
+    TEST_ASSERT_TRUE_MESSAGE(ok, "a full-length packet carries fuel level");
+
+    // A v2.1 sender: 30 bytes, no fuel_level_pct at all.
+    espdash_signal_format(&t, 30, ESPDASH_SIG_FUEL_LEVEL, 0xFFFF, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("--", buf, "old sender must render as unknown");
+    espdash_signal_format(&t, 30, ESPDASH_SIG_SPEED, 0xFFFF, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("0", buf, "...but v2.0 fields still work");
+
+    // FUEL_VALID clear means "no reading", even at full length.
+    t.flags2 = 0;
+    espdash_signal_format(&t, (uint16_t)sizeof(t), ESPDASH_SIG_FUEL_LEVEL, 0xFFFF, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("--", buf, "invalid reading must not render as 0%");
+}
+
+static void test_odometer_delta_survives_wrap(void) {
+    // The wire counter is 16-bit and wraps every 3276 km. A trip spanning the
+    // rollover must still report forward progress, not 3276 km backwards.
+    EspDashTelemetry t;
+    memset(&t, 0, sizeof(t));
+    t.flags2 = ESPDASH_FLAG2_ODO_VALID;
+    bool ok = false;
+
+    t.odo_50m = 65500;                       // 20 counts (1.0 km) before the wrap
+    int32_t v = espdash_signal_x10(&t, (uint16_t)sizeof(t), ESPDASH_SIG_ODO_KM, 65500, &ok);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_INT32(0, v);
+
+    t.odo_50m = 16;                          // wrapped: 52 counts on = 2.6 km
+    v = espdash_signal_x10(&t, (uint16_t)sizeof(t), ESPDASH_SIG_ODO_KM, 65500, &ok);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(26, v, "2.6 km across the 16-bit rollover");
+}
+
 static void test_brake_is_16_bit(void) {
     // Reading byte 1 alone showed ~38% brake at rest and wrapped to 0 once the
     // raw value passed 255. Rest is raw ~100; hard braking reaches ~526.
@@ -359,10 +536,12 @@ static void test_0x372_cannot_set_ambient(void) {
     memset(&f, 0, sizeof(f));
 
     f.id = 0x21E; f.dlc = 7;
-    f.data[4] = 2;                                  // 2 C
+    f.data[3] = 42;                                 // 42 - 40 = 2 C
+    f.data[4] = 0x60;                               // byte 4 is a bitfield now
     f.data[6] = honda_checksum(0x21E, f.data, 7);
     TEST_ASSERT_TRUE(can_decode_frame(&st, &f, 10));
-    TEST_ASSERT_EQUAL_INT8(2, st.ambient_temp);
+    TEST_ASSERT_EQUAL_INT8_MESSAGE(2, st.ambient_temp,
+                                   "ambient must come from byte 3, not byte 4");
 
     memset(&f, 0, sizeof(f));
     f.id = 0x372; f.dlc = 2;
@@ -455,6 +634,12 @@ int main(void) {
     RUN_TEST(test_wheel_speeds_8th_gen_10kmh);
     RUN_TEST(test_9th_gen_si_drive);
     RUN_TEST(test_user_2014_capture_regression);
+    RUN_TEST(test_wot_pedal_scale);
+    RUN_TEST(test_fuel_level_refuel);
+    RUN_TEST(test_fuel_level_low_and_lamp);
+    RUN_TEST(test_signal_catalog_is_consistent);
+    RUN_TEST(test_signal_catalog_gates_on_payload_len);
+    RUN_TEST(test_odometer_delta_survives_wrap);
     RUN_TEST(test_brake_is_16_bit);
     RUN_TEST(test_steering_sign_and_scale);
     RUN_TEST(test_0x372_cannot_set_ambient);

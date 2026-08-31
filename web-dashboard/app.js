@@ -29,7 +29,15 @@ const fillOilTemp = document.getElementById('fillOilTemp');
 const overheatAlert = document.getElementById('overheatAlert');
 
 const valBattery = document.getElementById('valBattery');
+let tripOdoBase = null;   // first odo tick seen; trip distance is measured from it
 const valFuel = document.getElementById('valFuel');
+const valFuelLevel = document.getElementById('valFuelLevel');
+const valCabin = document.getElementById('valCabin');
+const valFuelLitres = document.getElementById('valFuelLitres');
+const valTrip = document.getElementById('valTrip');
+const valGearNum = document.getElementById('valGearNum');
+const valLights = document.getElementById('valLights');
+const valFan = document.getElementById('valFan');
 const valThrottle = document.getElementById('valThrottle');
 const valSteering = document.getElementById('valSteering');
 const valBrake = document.getElementById('valBrake');
@@ -175,7 +183,6 @@ function startDemoSimulation() {
         const throttle = Math.round(Math.max(0, Math.sin(simTime * 1.5)) * 100);
         const waterTemp = 88.0 + 3.0 * Math.sin(simTime * 0.1);
         const oilTemp = 92.0 + 4.0 * Math.sin(simTime * 0.08);
-        const batteryV = 13.8 + 0.3 * Math.sin(simTime * 0.5);
         const steering = Math.round(140.0 * Math.sin(simTime * 0.35)); // -140° to +140°
         const cornerSlip = (steering / 140.0) * 3.5; // Outer wheels spin faster in corners!
         const nowMs = Math.round(simTime * 1000);
@@ -202,9 +209,18 @@ function startDemoSimulation() {
             speed: parseFloat(speed.toFixed(1)),
             water_temp: parseFloat(waterTemp.toFixed(1)),
             oil_temp: parseFloat(oilTemp.toFixed(1)),
-            battery_v: parseFloat(batteryV.toFixed(2)),
+            battery_v: 0,   // no CAN source; see updateTelemetryUI
             gear: gearIdx,
-            fuel: Math.max(10, Math.round(76 - simTime * 0.05)),
+            // Trip average x10: drifts slowly, which is what the real 0x324
+            // byte 1 does. It does NOT track throttle.
+            fuel_consumption_x10: Math.round(88 + 6 * Math.sin(simTime * 0.03)),
+            fuel_level: Math.round(50 + 50 * Math.sin(simTime * 0.02)),
+            low_fuel: Math.round(50 + 50 * Math.sin(simTime * 0.02)) <= 13,
+            gear_num: gearIdx,
+            cabin_temp: 21,
+            odo_50m: Math.round(simTime * 5) & 0xFFFF,
+            fan_speed: 1 + (Math.floor(simTime / 8) % 5),
+            lights: Math.floor(simTime / 12) % 4,
             throttle: Math.round(throttle),
             steering: Math.round(steering),
             brake: brakeBar,
@@ -277,8 +293,7 @@ function startDemoSimulation() {
         parseRawCanFrame(`RAW,${nowMs},0x13C,0,8,00,4D,00,98,00,00,04,20`);
         parseRawCanFrame(`RAW,${nowMs},0x305,0,8,8E,14,00,00,00,00,05,00`);
 
-        const batVal = Math.round(batteryV * 10);
-        parseRawCanFrame(`RAW,${nowMs},0x309,0,8,00,${batVal.toString(16).padStart(2,'0').toUpperCase()},00,00,00,00,00,0C`);
+        parseRawCanFrame(`RAW,${nowMs},0x309,0,8,00,8A,00,00,00,00,00,0C`);
 
     }, 50);
 }
@@ -393,7 +408,9 @@ function resetUI() {
         oil_temp: -20,
         battery_v: 0,
         gear: 0,
-        fuel: 0,
+        fuel_consumption_x10: 0,
+        fuel_level: -1,
+        low_fuel: false,
         throttle: 0,
         steering: 0,
         brake: 0,
@@ -584,8 +601,43 @@ function updateTelemetryUI(data) {
     }
 
     // 5. Secondary Grid Readouts
-    valBattery.textContent = `${(data.battery_v || 0).toFixed(1)} V`;
-    valFuel.textContent = `${data.fuel || 0} %`;
+    // battery_v has no CAN source since 0x305 byte 0 was retracted on
+    // 2026-08-29 (a bitfield frozen at "14.2 V", not a measurement). Show a
+    // blank rather than a confident 0.0 V.
+    valBattery.textContent = data.battery_v ? `${data.battery_v.toFixed(1)} V` : '-- V';
+    // TRIP-AVERAGE consumption, not tank level and not a live figure: the
+    // gateway sends fuel_consumption_x10 (94 = 9.4 L/100km) straight from
+    // 0x324 b1, which barely moves under throttle. See CAN_PROTOCOL_MAP.md
+    // sections G and H.
+    const lph = data.fuel_consumption_x10;
+    valFuel.textContent = lph ? `${(lph / 10).toFixed(1)} L/100km` : '-- L/100km';
+    // Real tank level, found 2026-08-30 (0x1A6 byte 3, 105 = full). The
+    // gateway sends -1 when it has no reading, because 0% is a real value a
+    // driver has to be able to trust. Red follows the car's own low-fuel
+    // lamp rather than a threshold of ours.
+    const lvl = data.fuel_level;
+    valFuelLevel.textContent = (lvl === undefined || lvl < 0) ? '-- %' : `${lvl} %`;
+    valFuelLevel.style.color = data.low_fuel ? '#ff4d4d' : '';
+    // The raw CAN byte is half-litres, so litres = percent / 2 below the
+    // clamp. Above it the tank is brimmed and 50 L is the honest floor.
+    valFuelLitres.textContent = (lvl === undefined || lvl < 0) ? '-- L' : `${(lvl / 2).toFixed(1)} L`;
+
+    valCabin.textContent = (data.cabin_temp === undefined) ? '-- °C' : `${data.cabin_temp} °C`;
+    valGearNum.textContent = data.gear_num ? String(data.gear_num) : '--';
+    valFan.textContent = (data.fan_speed === undefined) ? '--' : String(data.fan_speed);
+    valLights.textContent = ['DRL', 'Position', 'Low beam', 'High beam'][data.lights] || '--';
+
+    // odo_50m is a 16-bit counter of 50 m ticks that WRAPS every 3276 km, so
+    // an absolute reading is meaningless. Measure from the first value this
+    // page saw; the unsigned wrap makes the subtraction come out right even
+    // across the rollover.
+    if (data.odo_50m !== undefined && data.odo_50m >= 0) {
+        if (tripOdoBase === null) tripOdoBase = data.odo_50m;
+        const ticks = (data.odo_50m - tripOdoBase) & 0xFFFF;
+        valTrip.textContent = `${(ticks * 0.05).toFixed(2)} km`;
+    } else {
+        valTrip.textContent = '-- km';
+    }
     valThrottle.textContent = `${data.throttle || 0} %`;
     valSteering.textContent = `${data.steering || 0}°`;
     valBrake.textContent = `${data.brake || 0} Bar`;

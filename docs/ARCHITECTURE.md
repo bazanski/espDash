@@ -11,29 +11,131 @@
 The central ESP32-S3 gateway maintains two concurrent output channels:
 
 1. **ESP-NOW 2.4 GHz Peer-to-Peer Multicast Broadcast:**
-   * Transmits a compact **32-byte TelemetryPacket** at 20Hz–50Hz to in-car display nodes (~1-3ms latency, zero connection handshake wait).
+   * Transmits a compact **8-byte header + 30-byte telemetry body** at 20Hz–50Hz to in-car display nodes (~1-3ms latency, zero connection handshake wait).
 2. **WebSocket / WebSerial Debug Channel (Port 8888):**
    * Serves live telemetry JSON and raw CAN frames to the web dashboard on laptop/tablet over Wi-Fi (`10.0.0.43` / `esp32-gateway.local`) or USB WebSerial (`navigator.serial`).
 
 ---
 
-## 2. TelemetryPacket Payload (32 Bytes)
+## 2. Telemetry Payload
+
+**`firmware/shared/EspDashProto/EspDashProto.h` is the single source of truth.** It is included by
+the gateway and by every display node; the struct is never copied into a node. The block below is a
+reader's summary — if it and the header ever disagree, the header is right.
+
+Wire format is an 8-byte `EspDashHeader` followed by a 30-byte `EspDashTelemetry` body
+(proto v2.1). The layout is **append-only**: receivers gate on `payload_len` via `ESPDASH_HAS()`,
+so an old node ignores trailing fields from a new gateway and a new node skips fields an old
+gateway does not send. Neither goes dark, and no field below may be reordered or removed.
 
 ```cpp
 typedef struct __attribute__((packed)) {
-    uint16_t rpm;           // 0 - 9000 RPM (1 RPM resolution)
-    uint16_t speed_kmh_x10; // 0 - 300.0 km/h (0.1 km/h resolution)
-    int16_t  water_temp_x10;// -40.0 to +150.0 °C (0.1 °C resolution)
-    int16_t  oil_temp_x10;  // -40.0 to +150.0 °C (0.1 °C resolution)
-    uint16_t battery_mv;    // 0 - 20,000 mV (e.g., 13800 = 13.8V)
-    uint8_t  gear;          // 0=P, 1=R, 2=N, 3=D, 4=S, 5=1st, 6=2nd, etc.
-    uint8_t  fuel_pct;      // 0 - 100 %
-    int16_t  steering_deg;  // -720 to +720 degrees
-    int8_t   ambient_temp;  // -40 to +80 °C
-    uint8_t  flags;         // Bit 0: Engine Running, Bit 1: Shift Warning, Bit 2: Overheat
-    uint32_t timestamp_ms;  // Gateway Uptime in ms
-} TelemetryPacket;
+    // ---- v2.0 ---- APPEND ONLY BELOW ------------------------------------
+    uint16_t rpm;                  // 0-9000 RPM
+    uint16_t speed_kmh_x10;        // 0-3000 = 0-300.0 km/h
+    int16_t  water_temp_x10;       // -40.0 .. +150.0 C
+    int16_t  oil_temp_x10;         // NOT on the broadcast bus - stays 0
+    uint16_t battery_mv;           // NO CAN SOURCE - stays 0, see below
+    uint8_t  gear;                 // 0=P 1=R 2=N 3=D 4=S
+    uint8_t  fuel_consumption_x10; // INSTANT consumption, L/100km x10 (94 = 9.4)
+                                   // NOT tank level - see below
+    int16_t  steering_deg;         // signed, negative = left
+    int8_t   ambient_temp;         // whole degrees C
+    uint8_t  flags;                // ESPDASH_FLAG_*
+    uint8_t  throttle_pct;         // 0-100 %
+    uint8_t  brake_pct;            // 0-100 %
+    uint32_t timestamp_ms;         // gateway uptime
+    // ---- added in v2.1 --------------------------------------------------
+    uint16_t wheel_fl_x10, wheel_fr_x10, wheel_rl_x10, wheel_rr_x10;
+    // ---- added in v2.3 --------------------------------------------------
+    uint8_t  fuel_level_pct;       // TANK LEVEL 0-100 % (0x1A6 b3 = half-litres,
+                                   // 1 count = 1 % of 50 L; 105 = brimmed, clamped)
+    uint8_t  gear_num;             // engaged gear 1-5, 0 = none/shifting
+    uint8_t  flags2;               // LOW_FUEL / ECON / SPORT / TURN_L / TURN_R
+                                   // / FUEL_VALID
+} EspDashTelemetry;
 ```
+
+**Minor 2 is deliberately skipped.** An unmerged branch (`feature/xiao-dual-round-gauge`) already
+published a v2.2 with a *different* field at offset 30. Jumping to 2.3 keeps the guarantee that a
+version number identifies exactly one layout.
+
+### Three fields that are deliberately empty or renamed
+
+These are the ones that trip people up, so they are called out here rather than only in the
+protocol map:
+
+| Field | State | Why |
+|---|---|---|
+| `oil_temp_x10` | always 0 | Not broadcast at all. Exists only as a Mode-22 diagnostic PID, which needs a transmitted request; the gateway is listen-only by design |
+| `battery_mv` | always 0 since 2026-08-29 | `0x305` byte 0 was read as 100 mV/count. It is *exactly* 142 ("14.2 V") in four stationary captures three weeks apart and 6–14 across a whole drive — a bitfield, not a measurement. Retracted; UIs must render a blank, not `0.0 V` |
+| `fuel_consumption_x10` | **trip average**, not tank level and not a live figure | Renamed from `fuel_pct` on 2026-08-15; the name is now kept only for wire compatibility. It is the trip-average consumption in L/100km ×10 — two WOT pulls move it by one count (`CAN_PROTOCOL_MAP.md` §H). **Tank level is not broadcast on this car's bus at all** — exhaustively ruled out on 2026-08-29 (§G). A live instantaneous figure has to be *computed*; this byte cannot supply one |
+
+### 2.1 The signal catalog — how screens get laid out
+
+**`firmware/shared/EspDashProto/EspDashSignals.h`.** Every signal the car gives us is now on the
+wire whether or not any screen renders it, and the catalog turns "which readings does this display
+show" into **a list of IDs instead of a firmware change**:
+
+```cpp
+static const EspDashSignalId kBottomRow[3] = {
+    ESPDASH_SIG_COOLANT, ESPDASH_SIG_FUEL_LEVEL, ESPDASH_SIG_GEAR,
+};
+// ... the render loop asks the catalog for everything else
+espdash_signal_format(&pkt, plen, kBottomRow[i], odo_base, txt, sizeof(txt));
+spr.drawString(String(txt) + info->unit, x, y);
+spr.drawString(info->label, x, y + 14);
+```
+
+Reordering that array re-lays-out the screen. No gateway change, no protocol change, no per-node
+format strings to get wrong. `firmware/display-nodes/xiao-round-gauge` drives its bottom row this
+way as the worked example.
+
+The catalog supplies, per signal: a **stable key** (the same string used in the telemetry JSON and
+by `espdash_signal_by_key()`, so a layout can come from config rather than compiled-in enums), a
+short **label**, a **unit**, a sensible **gauge range**, the number of **decimals**, and a **kind**
+(number / flag / enum, with text for enums like `DRL / POS / LOW / HIGH`).
+
+Two things it deliberately does *not* own:
+
+- **Warning colours.** A red threshold is a judgement about this specific car, not a property of
+  the number, so it stays in the node. Where the car has its own telltale — the low-fuel lamp — use
+  that rather than inventing a percentage.
+- **Layout geometry.** Positions and sizes belong to the screen.
+
+**Version safety is built in.** Every accessor takes the sender's `payload_len` and reports
+"no reading" when that gateway is too old to carry the field, so a node built against a newer
+catalog shows `--` rather than a zero or garbage. Same contract as `ESPDASH_HAS()`.
+
+Run `SIGNALS` on the gateway's serial or telnet console to print the live catalog — id, key, label,
+unit, range and the current value of each — which is the authoritative list to lay a screen out
+from.
+
+### Adding a new signal end to end
+
+1. Decode it in `can_decode.cpp`, add the field to `CanDecodeState`.
+2. Append to `EspDashTelemetry`, bump `ESPDASH_PROTO_MINOR`, update the size `static_assert`.
+3. Copy it into the packet and the JSON in the gateway's `main.cpp`.
+4. Append to `EspDashSignalId` **and** the matching row in `espdash_signal_table()`, add a case to
+   `espdash_signal_x10()`. The `static_assert` on `ESPDASH_SIG_COUNT` catches a mismatch.
+5. Add a row to the data matrix in `CAN_PROTOCOL_MAP.md` §A.
+
+Nothing in step 4 or 5 requires touching a display node — it can pick the signal up whenever it
+wants to.
+
+---
+
+## 3. Signal provenance
+
+Every decoded signal carries an evidence tag (**CONFIRMED / LOCAL / ON-ROAD / REFERENCE /
+UNMAPPED**) in `docs/CAN_PROTOCOL_MAP.md`. Nothing is asserted from a single source alone. Two
+working rules come out of that document and belong here too:
+
+- **The last byte of a Honda message is metadata, not signal.** 44 of this car's 45 IDs carry a
+  4-bit checksum in the low nibble and a 2-bit counter above it. Any decode that reads it is wrong.
+- **A signal that never changes cannot be validated by analysis — it has to be provoked.** Scripted
+  single-subsystem captures with a written running order are this project's highest-yield tool; see
+  `CAN_PROTOCOL_MAP.md` §G and `CAPTURE_ABS_TC.md`.
 
 ---
 
