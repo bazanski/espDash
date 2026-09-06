@@ -413,9 +413,11 @@ void setup() {
     Serial.println(" DISPLAY: GC9A01 240x240 Round TFT (SPI)");
     Serial.println("=================================================================");
 
-    // Turn on display backlight (GPIO 43 on XIAO ESP32-S3 round expansion board)
+    // Turn on display backlight (GPIO 43) and park Screen A CS (GPIO 2) HIGH
     pinMode(43, OUTPUT);
     digitalWrite(43, HIGH);
+    pinMode(2, OUTPUT);
+    digitalWrite(2, HIGH);
 
     // Initialize GC9A01 TFT Display
     tft.init();

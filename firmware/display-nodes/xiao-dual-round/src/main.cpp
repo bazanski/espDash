@@ -4,43 +4,28 @@
 #include <esp_now.h>
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
+#include "ui/ui.h"
+#include "ui/screens.h"
 
 // =========================================================================
 // ESP-NOW TELEMETRY - shared wire protocol
 // =========================================================================
-// The packet layout lives in firmware/shared/EspDashProto. Do NOT paste a
-// copy of the struct in here: that is exactly how the gateway and this node
-// drifted apart before.
 #include <EspDashProto.h>
 
 static EspDashTelemetry current_pkt = {0};
-static uint16_t  current_payload_len = 0;   // what the sender actually sent
+static uint16_t  current_payload_len = 0;
 static uint32_t  last_pkt_rx_time = 0;
 static uint16_t  last_seq = 0;
-static volatile uint32_t pkt_gaps = 0;      // missed sequence numbers
-static volatile uint32_t pkt_count = 0;     // valid packets since boot
+static volatile uint32_t pkt_gaps = 0;
+static volatile uint32_t pkt_count = 0;
 static bool      ever_linked = false;
 
-// ---- ESP-NOW channel ----------------------------------------------------
-// With ESPDASH_NODE_WIFI=0 (the default, and the only mode this node
-// supports) this node never associates to Wi-Fi, so it locks to
-// ESPDASH_ESPNOW_CHANNEL in setup() - the same fixed constant the gateway
-// uses - and never needs to move. Ported verbatim from xiao-round-gauge;
-// see that node's main.cpp:33-49 for the full channel-hop rationale (this
-// node doesn't compile that branch in, ESPDASH_NODE_WIFI is not wired up
-// as a runtime option here the way it is on node 2 - always off).
 static uint8_t  espnow_channel = ESPDASH_ESPNOW_CHANNEL;
 static bool     channel_locked = false;
-#define LINK_TIMEOUT_MS  1500   // no valid packet => link considered lost
+#define LINK_TIMEOUT_MS  1500
 
-// LINK_LOST is deliberately distinct from LINK_SEARCHING: a gauge that had a
-// gateway and lost it is a fault worth showing, whereas one that has never
-// seen a gateway is just still looking.
 enum LinkState { LINK_LIVE, LINK_SEARCHING, LINK_LOST };
 
-// The channel the radio is actually on, which is not necessarily
-// espnow_channel: when Wi-Fi is associated it owns the channel and the scan
-// never runs, so the scan variable would misreport it.
 static uint8_t actual_channel() {
     uint8_t ch = 0;
     wifi_second_chan_t sec;
@@ -49,24 +34,19 @@ static uint8_t actual_channel() {
 }
 
 // =========================================================================
-// ESP-NOW RECEIVE CALLBACK - ported verbatim from xiao-round-gauge:146-176
+// ESP-NOW RECEIVE CALLBACK
 // =========================================================================
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     uint16_t plen = 0, seq = 0;
     const EspDashTelemetry *t = espdash_parse(incomingData, len, &plen, &seq);
-    if (!t) return;   // not ours, or an incompatible major version
+    if (!t) return;
 
-    // Copy only what the sender actually provided, leaving any newer trailing
-    // fields we do not know about at zero. This is what lets an old node keep
-    // working against a newer gateway.
     uint16_t copy = plen < sizeof(EspDashTelemetry) ? plen : sizeof(EspDashTelemetry);
     memset(&current_pkt, 0, sizeof(current_pkt));
     memcpy(&current_pkt, t, copy);
     current_payload_len = plen;
 
     if (ever_linked) {
-        // Count how many packets were actually missed, not just how many times
-        // a discontinuity occurred - the difference matters when diagnosing.
         uint16_t missed = (uint16_t)(seq - last_seq - 1);
         if (missed && missed < 1000) pkt_gaps += missed;
     }
@@ -84,7 +64,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 }
 
 // =========================================================================
-// REUSED HELPERS - verbatim from xiao-round-gauge
+// HELPERS & CIVIC ECO-COACHING COLOR LOGIC
 // =========================================================================
 static const char* get_gear_str(uint8_t g) {
     switch(g) {
@@ -103,19 +83,11 @@ static const char* get_gear_str(uint8_t g) {
     }
 }
 
-// CIVIC 9G 1.8L ECO-COACHING COLOR LOGIC - xiao-round-gauge/src/main.cpp:198-219
 static uint32_t get_civic_rpm_color(uint16_t rpm) {
     if (rpm <= 2500) return 0x00e676; // Bright Green
     else if (rpm <= 3500) return 0x00e5ff; // Cyan
     else if (rpm <= 4800) return 0xffd600; // Yellow
     else if (rpm <= 6200) return 0xff9100; // Orange
-    else return 0xff1744; // Red
-}
-
-static uint32_t get_civic_throttle_color(uint8_t thr_pct) {
-    if (thr_pct <= 25) return 0x00e676; // Bright Green
-    else if (thr_pct <= 45) return 0xffd600; // Gold / Yellow
-    else if (thr_pct <= 70) return 0xff9100; // Orange
     else return 0xff1744; // Red
 }
 
@@ -125,6 +97,33 @@ static uint32_t get_civic_efficiency_color(float l_per_100km) {
     else if (l_per_100km <= 12.5f) return 0xffd600; // Gold / Yellow
     else if (l_per_100km <= 16.5f) return 0xff9100; // Orange
     else return 0xff1744; // Vivid Red
+}
+
+static uint32_t get_civic_throttle_color(uint8_t thr_pct) {
+    if (thr_pct <= 25) return 0x00e676; // Bright Green
+    else if (thr_pct <= 45) return 0xffd600; // Gold / Yellow
+    else if (thr_pct <= 70) return 0xff9100; // Orange
+    else return 0xff1744; // Red
+}
+
+static uint32_t get_civic_brake_color(uint8_t brake_pct) {
+    if (brake_pct <= 5) return 0x00e676; // Normal/Off (Green)
+    else if (brake_pct <= 35) return 0x00e5ff; // Light braking (Cyan)
+    else if (brake_pct <= 65) return 0xffd600; // Moderate (Gold)
+    else return 0xff1744; // Hard (Red)
+}
+
+static uint32_t get_civic_coolant_color(int16_t temp_c) {
+    if (temp_c < 70) return 0x00e5ff; // Cold engine warm-up (Cyan)
+    else if (temp_c <= 98) return 0x00e676; // Normal optimal operating temp (Green)
+    else if (temp_c <= 104) return 0xffd600; // Getting warm (Gold)
+    else return 0xff1744; // Overheating warning (Red)
+}
+
+static uint32_t get_civic_fuel_level_color(uint8_t fuel_pct) {
+    if (fuel_pct >= 35) return 0x00e676; // Plenty of fuel (Green)
+    else if (fuel_pct >= 18) return 0xffd600; // Quarter tank (Gold)
+    else return 0xff1744; // Low fuel reserve warning (Red)
 }
 
 static void setup_arc_style(lv_obj_t *arc, int16_t range_min, int16_t range_max, uint32_t track_color, uint32_t indic_color, lv_coord_t arc_w) {
@@ -154,54 +153,43 @@ static void setup_arc_style(lv_obj_t *arc, int16_t range_min, int16_t range_max,
 }
 
 // =========================================================================
-// DUAL PANEL BUS/DISPLAY - the new part this node exists for
+// DUAL PANEL HARDWARE CONFIGURATION
 // =========================================================================
-// Pin assignments per the approved plan (snoopy-enchanting-bachman.md).
-// Shared MOSI/SCLK/RST/BL is deliberate: reuses xiao-round-gauge's existing
-// pin assignments for the shared lines unchanged.
-#define PIN_MOSI 9
-#define PIN_SCLK 7
-#define PIN_RST  4
-#define PIN_BL   43
-#define PIN_CS_A 2
-#define PIN_DC_A 3
-#define PIN_CS_B 1
-#define PIN_DC_B 5
+// Verified hardware pin map on Waveshare ESP32-S3-Zero:
+#define PIN_MOSI 8   // ESP32-S3-Zero: Pin labeled "8" (SDA line)
+#define PIN_SCLK 7   // ESP32-S3-Zero: Pin labeled "7" (SCL line)
+#define PIN_RST  4   // ESP32-S3-Zero: Pin labeled "4" (GP4)
+#define PIN_BL   43  // ESP32-S3-Zero: Pin labeled "TX" (Backlight)
+#define PIN_CS_A 2   // ESP32-S3-Zero: Pin labeled "2" (GP2) - Screen A CS
+#define PIN_DC_A 3   // ESP32-S3-Zero: Pin labeled "3" (GP3) - Screen A DC
+#define PIN_CS_B 1   // ESP32-S3-Zero: Pin labeled "1" (GP1) - Screen B CS
+#define PIN_DC_B 5   // ESP32-S3-Zero: Pin labeled "5" (GP5) - Screen B DC
 
 #define PANEL_H  240   // one physical panel's height
-#define VDISP_W  240   // virtual LVGL display: 240 wide...
-#define VDISP_H  480   // ...480 tall = panel A (rows 0-239) + panel B (rows 240-479)
+#define VDISP_W  240   // virtual LVGL display: 240 wide
+#define VDISP_H  480   // virtual LVGL display: 480 tall (Panel A: 0..239, Panel B: 240..479)
 
-#define SPI_HZ   40000000UL   // 40MHz to start - see plan for the 80MHz bench-experiment note
+#define SPI_HZ   80000000UL   // 80 MHz high-speed SPI clock
 
-// Two independent Arduino_ESP32SPI bus objects sharing one SPI peripheral
-// (is_shared_interface = true), each with its own DC/CS. Constructor order
-// verified against the actual installed GFX 1.4.9 header
-// (esp-round-amoled-touch/.pio/libdeps/.../databus/Arduino_ESP32SPI.h):
-//   Arduino_ESP32SPI(dc, cs, sck, mosi, miso, spi_num, is_shared_interface)
-// Note DC precedes CS positionally - easy to get backwards by ear from the
-// plan's prose ("its own DC and CS"), which is why this is spelled out here.
 static Arduino_DataBus *busA = new Arduino_ESP32SPI(
     PIN_DC_A, PIN_CS_A, PIN_SCLK, PIN_MOSI, GFX_NOT_DEFINED, FSPI, true);
 static Arduino_DataBus *busB = new Arduino_ESP32SPI(
     PIN_DC_B, PIN_CS_B, PIN_SCLK, PIN_MOSI, GFX_NOT_DEFINED, FSPI, true);
 
-// GFX_NOT_DEFINED as RST on BOTH panels. RST is driven manually, once, in
-// setup() below (single shared physical pin). Verified in the installed
-// Arduino_GC9A01.cpp::tftInit(): when _rst == GFX_NOT_DEFINED, tftInit()
-// skips the hardware reset pulse entirely (no software-reset command is
-// sent either - it relies on our external pulse having already happened).
-// If either constructor were given PIN_RST directly instead, that panel's
-// begin() would pulse reset itself - and bringing up B would re-pulse reset
-// out from under an already-initialized A.
-static Arduino_GC9A01 *gfxA = new Arduino_GC9A01(busA, GFX_NOT_DEFINED, 0, false, 240, 240);
-static Arduino_GC9A01 *gfxB = new Arduino_GC9A01(busB, GFX_NOT_DEFINED, 0, false, 240, 240);
+// Hardware alignment calibration (in case physical LCD glass is offset inside circular bezel)
+#define HARDWARE_OFFSET_X_A  1  // Screen A X offset (+: right, -: left) -> 1px right
+#define HARDWARE_OFFSET_Y_A  0  // Screen A Y offset (+: down, -: up)
+#define HARDWARE_OFFSET_X_B  0  // Screen B X offset (+: right, -: left)
+#define HARDWARE_OFFSET_Y_B  1  // Screen B Y offset (+: down, -: up) -> 1px down
 
-// ---- The splitting flush_cb ---------------------------------------------
-// From the approved plan, verbatim design: color_p arrives row-major with
-// stride == area width, which for a vertical split is always 240 (the panel
-// width) - so a straddling area splits into two tightly packed contiguous
-// chunks by pointer arithmetic, no copy needed.
+// Pass GFX_NOT_DEFINED as RST because shared RST is manually pulsed in setup()
+// GC9A01 1.28" round displays are IPS panels: ips MUST be true so Display Inversion is ON (0x0000 = pure black)
+static Arduino_GC9A01 *gfxA = new Arduino_GC9A01(busA, GFX_NOT_DEFINED, 0, true /* IPS */, 240, 240, HARDWARE_OFFSET_X_A, HARDWARE_OFFSET_Y_A, 0, 0);
+static Arduino_GC9A01 *gfxB = new Arduino_GC9A01(busB, GFX_NOT_DEFINED, 2, true /* IPS */, 240, 240, 0, 0, HARDWARE_OFFSET_X_B, HARDWARE_OFFSET_Y_B); // 2 = 180 deg rotation
+
+// =========================================================================
+// LVGL 240x480 VIRTUAL DISPLAY SPLITTING FLUSH_CB
+// =========================================================================
 static void flush_cb(lv_disp_drv_t *d, const lv_area_t *area, lv_color_t *color_p) {
     uint32_t w = area->x2 - area->x1 + 1;
     uint32_t h = area->y2 - area->y1 + 1;
@@ -219,13 +207,6 @@ static void flush_cb(lv_disp_drv_t *d, const lv_area_t *area, lv_color_t *color_
     lv_disp_flush_ready(d);
 }
 
-// ---- Per-frame FPS counter ----------------------------------------------
-// LVGL calls monitor_cb once per completed refresh cycle (a "frame", in the
-// sense of one round of dirty-rect flushing), independent of flush_cb which
-// may fire multiple times per frame for multiple dirty rects. This is what
-// step 5 of the plan measures on hardware; here it's just the counter and
-// the [LINK] log integration - no hardware to confirm the actual number
-// against the 50Hz estimate.
 static volatile uint32_t g_frame_count = 0;
 static void disp_monitor_cb(lv_disp_drv_t *disp_drv, uint32_t time_ms, uint32_t px) {
     (void)disp_drv; (void)time_ms; (void)px;
@@ -233,259 +214,226 @@ static void disp_monitor_cb(lv_disp_drv_t *disp_drv, uint32_t time_ms, uint32_t 
 }
 
 // ============================================================================
-// PLACEHOLDER UI - DELETE THIS ENTIRE BLOCK WHEN THE EEZ EXPORT LANDS
+// DUAL SCREEN TELEMETRY DISPATCH (EEZ STUDIO INTEGRATION)
 // ============================================================================
-// Stands in for `src/ui/` (an EEZ Studio export - user-authored, not present
-// yet; see docs/ARCHITECTURE.md S6). It exists only so this firmware compiles
-// and the hardware can be brought up end-to-end before the real UI exists.
-//
-// To swap it out once the EEZ export lands:
-//   1. Delete everything from this marker down to the matching
-//      "END PLACEHOLDER" marker below, including the global lv_obj_t*
-//      handles and build_placeholder_ui() itself.
-//   2. #include "ui/ui.h" and "ui/screens.h" at the top of this file
-//      (xiao-round-gauge/src/main.cpp:8-9 is the pattern).
-//   3. In setup(), replace the `build_placeholder_ui();` call (in the
-//      "#else" branch below) with `ui_init();`.
-//   4. In loop(), replace the placeholder update block (also behind
-//      "#else") with `ui_tick();` plus lv_label_set_text_fmt() /
-//      lv_arc_set_value() calls against the EEZ-generated `objects.*` tree.
-//      xiao-round-gauge/src/main.cpp:704-746 is the exact template to
-//      follow: same telemetry fields, same get_civic_*_color() thresholds,
-//      just against EEZ object names instead of the g_* handles below.
-//   5. lv_conf.h has a matching note about the EEZ native-variable
-//      extern/get_var_*/set_var_* block xiao-round-gauge's lv_conf.h
-//      carries - re-add the equivalent once the export generates its own
-//      variable ids.
-// ============================================================================
-static lv_obj_t *g_rpm_arc = nullptr;
-static lv_obj_t *g_speed_label = nullptr;
-static lv_obj_t *g_gear_label = nullptr;
-static lv_obj_t *g_link_label = nullptr;
-static lv_obj_t *g_inst_fuel_label = nullptr;
-static lv_obj_t *g_avg_fuel_label = nullptr;
-static lv_obj_t *g_coolant_label = nullptr;
-static lv_obj_t *g_batt_label = nullptr;
-static lv_obj_t *g_ambient_label = nullptr;
+static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_demo) {
+    // 1. Tick EEZ Studio UI engine
+    ui_tick();
 
-static void build_placeholder_ui() {
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0b0f19), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    // Cache previous colors to prevent full-widget invalidation on every frame
+    static uint32_t prev_rpm_col = 0;
+    static uint32_t prev_thr_col = 0;
+    static uint32_t prev_eff_col = 0;
+    static uint32_t prev_coolant_col = 0;
+    static uint32_t prev_brake_col = 0;
+    static uint32_t prev_fuel_col = 0;
 
-    // ---- Panel A (rows 0-239): driving ----
-    g_rpm_arc = lv_arc_create(scr);
-    lv_obj_set_size(g_rpm_arc, 200, 200);
-    lv_obj_set_pos(g_rpm_arc, 20, 20);
-    lv_arc_set_range(g_rpm_arc, 0, 8000);
-    lv_arc_set_bg_angles(g_rpm_arc, 135, 45);
-    lv_arc_set_rotation(g_rpm_arc, 0);
-    lv_arc_set_value(g_rpm_arc, 0);
-    setup_arc_style(g_rpm_arc, 0, 8000, 0x161b26, 0x00e676, 10);
-
-    g_speed_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(g_speed_label, &lv_font_montserrat_48, LV_PART_MAIN);
-    lv_obj_set_style_text_color(g_speed_label, lv_color_hex(0xffffff), LV_PART_MAIN);
-    lv_label_set_text(g_speed_label, "0");
-    lv_obj_align(g_speed_label, LV_ALIGN_TOP_MID, 0, 90);
-
-    g_gear_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(g_gear_label, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_text_color(g_gear_label, lv_color_hex(0xffd600), LV_PART_MAIN);
-    lv_label_set_text(g_gear_label, "P");
-    lv_obj_align(g_gear_label, LV_ALIGN_TOP_MID, 0, 160);
-
-    g_link_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(g_link_label, lv_color_hex(0x00e5ff), LV_PART_MAIN);
-    lv_label_set_text(g_link_label, "SEARCHING...");
-    lv_obj_align(g_link_label, LV_ALIGN_TOP_MID, 0, 6);
-
-    // ---- Panel B (rows 240-479, i.e. virtual y offset +240): efficiency ----
-    g_inst_fuel_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(g_inst_fuel_label, &lv_font_montserrat_48, LV_PART_MAIN);
-    lv_obj_set_style_text_color(g_inst_fuel_label, lv_color_hex(0x00e676), LV_PART_MAIN);
-    lv_label_set_text(g_inst_fuel_label, "0.0");
-    lv_obj_align(g_inst_fuel_label, LV_ALIGN_TOP_MID, 0, 240 + 30);
-
-    g_avg_fuel_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(g_avg_fuel_label, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
-    lv_label_set_text(g_avg_fuel_label, "avg --.- L/100km");
-    lv_obj_align(g_avg_fuel_label, LV_ALIGN_TOP_MID, 0, 240 + 90);
-
-    g_coolant_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(g_coolant_label, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
-    lv_label_set_text(g_coolant_label, "--C");
-    lv_obj_align(g_coolant_label, LV_ALIGN_TOP_MID, -55, 240 + 140);
-
-    g_batt_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(g_batt_label, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
-    lv_label_set_text(g_batt_label, "--.-V");
-    lv_obj_align(g_batt_label, LV_ALIGN_TOP_MID, 55, 240 + 140);
-
-    g_ambient_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(g_ambient_label, lv_color_hex(0x8c9eb5), LV_PART_MAIN);
-    lv_label_set_text(g_ambient_label, "amb --C");
-    lv_obj_align(g_ambient_label, LV_ALIGN_TOP_MID, 0, 240 + 180);
-}
-
-// Updates the placeholder widgets from live/demo telemetry. Deleted along
-// with the rest of this block when the EEZ export lands (step 4 above).
-static void update_placeholder_ui(const EspDashTelemetry &pkt, LinkState link) {
-    static uint32_t last_rpm_col = 0;
-
+    // ---- SCREEN A (Top Panel: Driving Dynamics) ----
     uint32_t rpm_col = get_civic_rpm_color(pkt.rpm);
-    if (g_rpm_arc) {
-        lv_arc_set_value(g_rpm_arc, pkt.rpm);
-        if (rpm_col != last_rpm_col) {
-            last_rpm_col = rpm_col;
-            lv_obj_set_style_arc_color(g_rpm_arc, lv_color_hex(rpm_col), LV_PART_INDICATOR);
+    uint32_t thr_col = get_civic_throttle_color(pkt.throttle_pct);
+    uint8_t eff_x10 = pkt.fuel_consumption_x10;
+    uint32_t eff_col = get_civic_efficiency_color(eff_x10 / 10.0f);
+
+    if (objects.rpm_arc) {
+        lv_arc_set_value(objects.rpm_arc, pkt.rpm);
+        if (rpm_col != prev_rpm_col) {
+            prev_rpm_col = rpm_col;
+            lv_obj_set_style_arc_color(objects.rpm_arc, lv_color_hex(rpm_col), LV_PART_INDICATOR);
+            if (objects.rpm__value) lv_obj_set_style_text_color(objects.rpm__value, lv_color_hex(rpm_col), LV_PART_MAIN);
+        }
+    }
+    if (objects.throttle_arc) {
+        lv_arc_set_value(objects.throttle_arc, pkt.throttle_pct);
+        if (thr_col != prev_thr_col) {
+            prev_thr_col = thr_col;
+            lv_obj_set_style_arc_color(objects.throttle_arc, lv_color_hex(thr_col), LV_PART_INDICATOR);
+            if (objects.throttle_value) lv_obj_set_style_text_color(objects.throttle_value, lv_color_hex(thr_col), LV_PART_MAIN);
+        }
+    }
+    if (objects.eff_arc) {
+        lv_arc_set_value(objects.eff_arc, eff_x10 / 10);
+        if (eff_col != prev_eff_col) {
+            prev_eff_col = eff_col;
+            lv_obj_set_style_arc_color(objects.eff_arc, lv_color_hex(eff_col), LV_PART_INDICATOR);
+            if (objects.eff_value) lv_obj_set_style_text_color(objects.eff_value, lv_color_hex(eff_col), LV_PART_MAIN);
         }
     }
 
-    if (g_speed_label) lv_label_set_text_fmt(g_speed_label, "%d", pkt.speed_kmh_x10 / 10);
-    if (g_gear_label) lv_label_set_text(g_gear_label, get_gear_str(pkt.gear));
-
-    if (g_link_label) {
-        const char *txt; uint32_t col;
-        switch (link) {
-            case LINK_LIVE:      txt = "LIVE";       col = 0x00e5ff; break;
-            case LINK_LOST:      txt = "LOST";       col = 0xff1744; break;
-            default:              txt = "SEARCHING..."; col = 0xffd600; break;
-        }
-        lv_label_set_text(g_link_label, txt);
-        lv_obj_set_style_text_color(g_link_label, lv_color_hex(col), LV_PART_MAIN);
+    if (objects.speed_value) {
+        lv_label_set_text_fmt(objects.speed_value, "%d", pkt.speed_kmh_x10 / 10);
+    }
+    if (objects.eff_value) {
+        lv_label_set_text_fmt(objects.eff_value, "%d.%d", eff_x10 / 10, eff_x10 % 10);
+    }
+    if (objects.throttle_value) {
+        lv_label_set_text_fmt(objects.throttle_value, "%d", pkt.throttle_pct);
+    }
+    if (objects.rpm__value) {
+        lv_label_set_text_fmt(objects.rpm__value, "%d", pkt.rpm);
     }
 
-    if (g_inst_fuel_label) {
-        uint8_t f = pkt.fuel_consumption_x10;
-        lv_label_set_text_fmt(g_inst_fuel_label, "%d.%d", f / 10, f % 10);
-        lv_obj_set_style_text_color(g_inst_fuel_label, lv_color_hex(get_civic_efficiency_color(f / 10.0f)), LV_PART_MAIN);
-    }
+    // ---- SCREEN B (Bottom Panel: Vehicle Health & Energy) ----
+    int16_t coolant_c = pkt.water_temp_x10 / 10;
+    uint32_t coolant_col = get_civic_coolant_color(coolant_c);
+    uint32_t brake_col = get_civic_brake_color(pkt.brake_pct);
 
-    if (g_avg_fuel_label) {
-        // Guard fuel_avg_x10 (v2.2) against an older gateway that never sent
-        // it: current_payload_len is 0 for demo packets (they never go
-        // through espdash_parse), so ESPDASH_HAS() correctly reads as "not
-        // present" during the demo sweep too, and the label shows "--".
-        if (ESPDASH_HAS(current_payload_len, fuel_avg_x10) && pkt.fuel_avg_x10 > 0) {
-            lv_label_set_text_fmt(g_avg_fuel_label, "avg %d.%d L/100km",
-                                   pkt.fuel_avg_x10 / 10, pkt.fuel_avg_x10 % 10);
-        } else {
-            lv_label_set_text(g_avg_fuel_label, "avg --.- L/100km");
-        }
-    }
+    // Fuel level (simulated/demo until gateway CAN 0x1A6 is added)
+    uint8_t fuel_pct = is_demo ? (uint8_t)(65 + sin(millis() * 0.0003f) * 10) : 65;
+    uint32_t fuel_col = get_civic_fuel_level_color(fuel_pct);
 
-    if (g_coolant_label) {
-        float c = pkt.water_temp_x10 / 10.0f;
-        bool overheat = c > 105.0f;
-        lv_label_set_text_fmt(g_coolant_label, "%d\xC2\xB0" "C", (int)c);
-        lv_obj_set_style_text_color(g_coolant_label, lv_color_hex(overheat ? 0xff1744 : 0x8c9eb5), LV_PART_MAIN);
-    }
+    // Remaining range (distance to empty in km): calculated from fuel level
+    uint16_t range_km = (uint16_t)((fuel_pct * 50.0f / 100.0f) / 7.2f * 100.0f);
 
-    if (g_batt_label) {
-        uint16_t mv = pkt.battery_mv;
-        if (mv > 0) {
-            bool low = mv < 12000;
-            lv_label_set_text_fmt(g_batt_label, "%d.%dV", mv / 1000, (mv % 1000) / 100);
-            lv_obj_set_style_text_color(g_batt_label, lv_color_hex(low ? 0xff1744 : 0x8c9eb5), LV_PART_MAIN);
-        } else {
-            lv_label_set_text(g_batt_label, "--.-V");
+    if (objects.coolant_arc) {
+        lv_arc_set_value(objects.coolant_arc, coolant_c);
+        if (coolant_col != prev_coolant_col) {
+            prev_coolant_col = coolant_col;
+            lv_obj_set_style_arc_color(objects.coolant_arc, lv_color_hex(coolant_col), LV_PART_INDICATOR);
+            if (objects.coolant_value) lv_obj_set_style_text_color(objects.coolant_value, lv_color_hex(coolant_col), LV_PART_MAIN);
         }
     }
+    if (objects.brake_arc) {
+        lv_arc_set_value(objects.brake_arc, pkt.brake_pct);
+        if (brake_col != prev_brake_col) {
+            prev_brake_col = brake_col;
+            lv_obj_set_style_arc_color(objects.brake_arc, lv_color_hex(brake_col), LV_PART_INDICATOR);
+            if (objects.brake_value) lv_obj_set_style_text_color(objects.brake_value, lv_color_hex(brake_col), LV_PART_MAIN);
+        }
+    }
+    if (objects.fuel_arc) {
+        lv_arc_set_value(objects.fuel_arc, fuel_pct);
+        if (fuel_col != prev_fuel_col) {
+            prev_fuel_col = fuel_col;
+            lv_obj_set_style_arc_color(objects.fuel_arc, lv_color_hex(fuel_col), LV_PART_INDICATOR);
+            if (objects.fuel_value) lv_obj_set_style_text_color(objects.fuel_value, lv_color_hex(fuel_col), LV_PART_MAIN);
+        }
+    }
 
-    if (g_ambient_label) lv_label_set_text_fmt(g_ambient_label, "amb %d\xC2\xB0" "C", pkt.ambient_temp);
+    if (objects.left_distance_value) {
+        lv_label_set_text_fmt(objects.left_distance_value, "%d", range_km);
+    }
+    if (objects.fuel_value) {
+        lv_label_set_text_fmt(objects.fuel_value, "%d", fuel_pct);
+    }
+    if (objects.brake_value) {
+        lv_label_set_text_fmt(objects.brake_value, "%d", pkt.brake_pct);
+    }
+    if (objects.coolant_value) {
+        lv_label_set_text_fmt(objects.coolant_value, "%d", coolant_c);
+    }
 }
-
-#if XIAO_DUAL_SEAM_TEST
-// Draws through the real flush_cb path (unlike a raw pre-LVGL gfxA/gfxB
-// test), so a correct render here proves the SPLIT is correct - not just
-// that both panels are wired up. See plan step 3.
-static void build_seam_test_pattern() {
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
-
-    // Full-height vertical bar spanning both panels (virtual y 0-479).
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_remove_style_all(bar);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x00ff00), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_size(bar, 40, VDISP_H);
-    lv_obj_set_pos(bar, 100, 0);
-
-    // Box straddling the seam: virtual y 210-270, i.e. rows 210-239 on
-    // panel A and rows 0-30 on panel B.
-    lv_obj_t *box = lv_obj_create(scr);
-    lv_obj_remove_style_all(box);
-    lv_obj_set_style_bg_color(box, lv_color_hex(0xff00ff), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_size(box, 60, 60);
-    lv_obj_set_pos(box, 90, 210);
-}
-#endif
-// ============================================================================
-// END PLACEHOLDER
-// ============================================================================
 
 // =========================================================================
 // SETUP
 // =========================================================================
 void setup() {
     Serial.begin(115200);
-    delay(300);
+    delay(500);
 
     Serial.println("\n=================================================================");
-    Serial.println(" espDash XIAO DUAL ROUND GAUGE (2x GC9A01, shared SPI bus)");
-    Serial.println(" Virtual display: 240x480 (panel A rows 0-239, panel B rows 240-479)");
+    Serial.println(" espDash DUAL ROUND GAUGE NODE (2x GC9A01, ESP32-S3-Zero)");
+    Serial.println(" Screen A: CS=2, DC=3 (Driving Gauge)");
+    Serial.println(" Screen B: CS=1, DC=5 (Efficiency Gauge)");
+    Serial.println(" Shared:   MOSI=8, SCLK=7, RST=4, BL=43");
     Serial.println("=================================================================");
 
-    // ---- Wi-Fi off, ESP-NOW channel-locked --------------------------------
-    // No Wi-Fi is ever attempted: no association, so no chance of parking the
-    // radio on a channel that doesn't match the gateway's fixed
-    // ESPDASH_ESPNOW_CHANNEL. Order matters here - disconnect(true, true)'s
-    // second argument stops the radio outright, so WiFi.mode(WIFI_STA) must
-    // come AFTER it to restart it into STA mode; reversed, ESP-NOW fails
-    // every send with ESP_ERR_ESPNOW_IF (found and fixed on the gateway the
-    // same way, see xiao-round-gauge/src/main.cpp:505-518).
+    // 1. Wi-Fi off, lock to ESP-NOW channel
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_STA);
     esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-    // ---- Deassert BOTH chip selects before touching either panel ----------
-    // Arduino_ESP32SPI::begin() drives its own CS high, but only its own - so
-    // during gfxA->begin() panel B's CS would still be an unconfigured,
-    // floating input. If it floats low, panel B latches panel A's entire init
-    // command sequence and comes up misconfigured, with no obvious symptom
-    // beyond "panel B looks wrong". Park both high first; begin() re-asserting
-    // them high afterwards is harmless.
+    // Full 240MHz native ESP32-S3 CPU clock for smooth anti-aliased rendering
+    setCpuFrequencyMhz(240);
+    Serial.printf("[SETUP] CPU frequency set to %u MHz.\n", getCpuFrequencyMhz());
+
+    // 2. Park BOTH chip selects HIGH before any initialization
     pinMode(PIN_CS_A, OUTPUT);
     digitalWrite(PIN_CS_A, HIGH);
     pinMode(PIN_CS_B, OUTPUT);
     digitalWrite(PIN_CS_B, HIGH);
 
-    // ---- Shared RST: pulse once, manually, before either panel begin()s ---
+    // 3. Hardware reset pulse on shared RST (GPIO 4)
+    Serial.println("[SETUP] Pulsing shared RST on GPIO 4...");
     pinMode(PIN_RST, OUTPUT);
     digitalWrite(PIN_RST, HIGH);
-    delay(20);
+    delay(50);
     digitalWrite(PIN_RST, LOW);
-    delay(20);
+    delay(50);
     digitalWrite(PIN_RST, HIGH);
-    delay(120);
+    delay(150);
 
-    pinMode(PIN_BL, OUTPUT);
-    digitalWrite(PIN_BL, HIGH);
+    // 4. Turn backlight on with LEDC PWM (duty: 180/255 ~70% brightness) to prevent GPIO/LDO thermal stress
+    ledcSetup(0, 5000, 8);
+    ledcAttachPin(PIN_BL, 0);
+    ledcWrite(0, 180);
+    Serial.println("[SETUP] Backlight ON via LEDC PWM (duty: 180/255).");
 
+    // 5. Initialize both displays via Arduino_GFX
+    Serial.println("[SETUP] Initializing Display A (CS=2, DC=3)...");
     gfxA->begin(SPI_HZ);
+    Serial.println("[SETUP] Initializing Display B (CS=1, DC=5, 180 deg)...");
     gfxB->begin(SPI_HZ);
-    gfxA->fillScreen(BLACK);
-    gfxB->fillScreen(BLACK);
+    gfxB->setRotation(2);
 
-    // ---- LVGL: one 240x480 virtual display, split in flush_cb -------------
+    // 6. Visual hardware calibration splash with optical alignment crosshairs (5 seconds)
+    Serial.println("[SETUP] Running visual alignment test pattern on both screens (5 seconds)...");
+    for (int s = 5; s >= 1; s--) {
+        // Screen A (Blue background)
+        gfxA->fillScreen(0x041F);
+        gfxA->drawCircle(120, 120, 119, 0xFFFF); // White outer perimeter (r=119)
+        gfxA->drawCircle(120, 120, 100, 0x07E0); // Green ring (r=100)
+        gfxA->drawCircle(120, 120, 60,  0xFFE0); // Yellow ring (r=60)
+        gfxA->drawFastVLine(120, 0, 240, 0xF800); // Red vertical centerline (x=120)
+        gfxA->drawFastHLine(0, 120, 240, 0xF800); // Red horizontal centerline (y=120)
+        // 5px tick marks on horizontal axis across center (-20px to +20px)
+        for (int dx = -20; dx <= 20; dx += 5) {
+            int tick_h = (dx == 0) ? 15 : ((dx % 10 == 0) ? 10 : 6);
+            gfxA->drawFastVLine(120 + dx, 120 - tick_h / 2, tick_h, (dx == 0) ? 0xF800 : 0xFFFF);
+        }
+        gfxA->setTextColor(0xFFFF);
+        gfxA->setTextSize(2);
+        gfxA->setCursor(48, 40);
+        gfxA->println("SCREEN A");
+        gfxA->setTextSize(1);
+        gfxA->setCursor(35, 65);
+        gfxA->printf("CENTER (120,120) [%ds]\n", s);
+        gfxA->setCursor(45, 175);
+        gfxA->println("Ticks = 5px step");
+
+        // Screen B (Purple background)
+        gfxB->fillScreen(0x780F);
+        gfxB->drawCircle(120, 120, 119, 0xFFFF); // White outer perimeter (r=119)
+        gfxB->drawCircle(120, 120, 100, 0x07E0); // Green ring (r=100)
+        gfxB->drawCircle(120, 120, 60,  0xFFE0); // Yellow ring (r=60)
+        gfxB->drawFastVLine(120, 0, 240, 0xF800); // Red vertical centerline (x=120)
+        gfxB->drawFastHLine(0, 120, 240, 0xF800); // Red horizontal centerline (y=120)
+        // 5px tick marks on horizontal axis across center (-20px to +20px)
+        for (int dx = -20; dx <= 20; dx += 5) {
+            int tick_h = (dx == 0) ? 15 : ((dx % 10 == 0) ? 10 : 6);
+            gfxB->drawFastVLine(120 + dx, 120 - tick_h / 2, tick_h, (dx == 0) ? 0xF800 : 0xFFFF);
+        }
+        gfxB->setTextColor(0xFFFF);
+        gfxB->setTextSize(2);
+        gfxB->setCursor(48, 40);
+        gfxB->println("SCREEN B");
+        gfxB->setTextSize(1);
+        gfxB->setCursor(35, 65);
+        gfxB->printf("CENTER (120,120) [%ds]\n", s);
+        gfxB->setCursor(45, 175);
+        gfxB->println("Ticks = 5px step");
+
+        delay(1000);
+    }
+
+    gfxA->fillScreen(0x0000);
+    gfxB->fillScreen(0x0000);
+
+    // 7. Initialize LVGL virtual 240x480 display
+    Serial.println("[SETUP] Initializing LVGL virtual display (240x480)...");
     lv_init();
-    static lv_color_t lv_draw_buf[VDISP_W * 48];   // 240x48 partial buffer, SRAM only - no full framebuffer
+    static lv_color_t lv_draw_buf[VDISP_W * 60];
     static lv_disp_draw_buf_t draw_buf;
-    lv_disp_draw_buf_init(&draw_buf, lv_draw_buf, NULL, VDISP_W * 48);
+    lv_disp_draw_buf_init(&draw_buf, lv_draw_buf, NULL, VDISP_W * 60);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -496,17 +444,137 @@ void setup() {
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
-#if XIAO_DUAL_SEAM_TEST
-    build_seam_test_pattern();
-#else
-    build_placeholder_ui();
-#endif
+    // 7b. Initialize EEZ Studio UI (creates objects.main with Screen B widgets)
+    ui_init();
 
-    // ---- ESP-NOW ------------------------------------------------------------
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    // Pure OLED pitch black background
+    lv_obj_set_style_bg_color(objects.main, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(objects.main, LV_OPA_COVER, LV_PART_MAIN);
+
+    // Style Screen A concentric arcs (Top Screen: centered at 120, 120)
+    if (objects.rpm_arc) lv_obj_set_pos(objects.rpm_arc, 10, 10);
+    if (objects.throttle_arc) lv_obj_set_pos(objects.throttle_arc, 30, 30);
+    if (objects.eff_arc) lv_obj_set_pos(objects.eff_arc, 50, 50);
+    setup_arc_style(objects.rpm_arc, 0, 8000, 0x141a24, 0x00e676, 8);
+    setup_arc_style(objects.throttle_arc, 0, 100, 0x141a24, 0x00e5ff, 6);
+    setup_arc_style(objects.eff_arc, 0, 20, 0x141a24, 0xffd600, 6);
+
+    // Style Screen B concentric arcs (Bottom Screen: centered at 120, 360)
+    if (objects.coolant_arc) lv_obj_set_pos(objects.coolant_arc, 10, 250);
+    if (objects.brake_arc) lv_obj_set_pos(objects.brake_arc, 30, 270);
+    if (objects.fuel_arc) lv_obj_set_pos(objects.fuel_arc, 50, 290);
+    lv_arc_set_range(objects.coolant_arc, 40, 120);
+    lv_arc_set_range(objects.brake_arc, 0, 100);
+    lv_arc_set_range(objects.fuel_arc, 0, 100);
+    setup_arc_style(objects.coolant_arc, 40, 120, 0x141a24, 0x00e676, 8);
+    setup_arc_style(objects.brake_arc, 0, 100, 0x141a24, 0x00e5ff, 6);
+    setup_arc_style(objects.fuel_arc, 0, 100, 0x141a24, 0x00e676, 6);
+
+    // Explicitly enforce centered 7-seg speed_value across full 240px width (Screen A)
+    if (objects.speed_value) {
+        lv_obj_set_pos(objects.speed_value, 0, 78);
+        lv_obj_set_size(objects.speed_value, 240, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.speed_value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.speed_value, lv_color_hex(0xffffff), LV_PART_MAIN);
+    }
+    if (objects.speed_label) {
+        lv_obj_set_pos(objects.speed_label, 0, 122);
+        lv_obj_set_size(objects.speed_label, 240, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.speed_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.speed_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+
+    // Explicitly enforce centered 7-seg left_distance_value across full 240px width (Screen B)
+    if (objects.left_distance_value) {
+        lv_obj_set_pos(objects.left_distance_value, 0, 318);
+        lv_obj_set_size(objects.left_distance_value, 240, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.left_distance_value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.left_distance_value, lv_color_hex(0xffffff), LV_PART_MAIN);
+    }
+    if (objects.left_distance_label) {
+        lv_obj_set_pos(objects.left_distance_label, 0, 362);
+        lv_obj_set_size(objects.left_distance_label, 240, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.left_distance_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.left_distance_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+
+    // Explicitly enforce centered lower telemetry rows (Screen A)
+    if (objects.eff_value) {
+        lv_obj_set_pos(objects.eff_value, 10, 159);
+        lv_obj_set_size(objects.eff_value, 107, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.eff_value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    }
+    if (objects.eff_label) {
+        lv_obj_set_pos(objects.eff_label, 121, 159);
+        lv_obj_set_style_text_align(objects.eff_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.eff_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+    if (objects.throttle_value) {
+        lv_obj_set_pos(objects.throttle_value, 10, 179);
+        lv_obj_set_size(objects.throttle_value, 112, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.throttle_value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    }
+    if (objects.throttle_label) {
+        lv_obj_set_pos(objects.throttle_label, 126, 179);
+        lv_obj_set_style_text_align(objects.throttle_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.throttle_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+    if (objects.rpm__value) {
+        lv_obj_set_pos(objects.rpm__value, 10, 197);
+        lv_obj_set_size(objects.rpm__value, 112, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.rpm__value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    }
+    if (objects.rpm__label) {
+        lv_obj_set_pos(objects.rpm__label, 126, 197);
+        lv_obj_set_style_text_align(objects.rpm__label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.rpm__label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+
+    // Explicitly enforce centered lower telemetry rows (Screen B)
+    if (objects.fuel_value) {
+        lv_obj_set_pos(objects.fuel_value, 10, 401);
+        lv_obj_set_size(objects.fuel_value, 112, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.fuel_value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    }
+    if (objects.fuel_label) {
+        lv_obj_set_pos(objects.fuel_label, 126, 401);
+        lv_obj_set_style_text_align(objects.fuel_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.fuel_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+    if (objects.brake_value) {
+        lv_obj_set_pos(objects.brake_value, 10, 420);
+        lv_obj_set_size(objects.brake_value, 112, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.brake_value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    }
+    if (objects.brake_label) {
+        lv_obj_set_pos(objects.brake_label, 126, 420);
+        lv_obj_set_style_text_align(objects.brake_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.brake_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+    if (objects.coolant_value) {
+        lv_obj_set_pos(objects.coolant_value, 10, 439);
+        lv_obj_set_size(objects.coolant_value, 110, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_align(objects.coolant_value, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    }
+    if (objects.coolant_label) {
+        lv_obj_set_pos(objects.coolant_label, 124, 439);
+        lv_obj_set_style_text_align(objects.coolant_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+        lv_obj_set_style_text_color(objects.coolant_label, lv_color_hex(0x6b7d96), LV_PART_MAIN);
+    }
+
+    // Immediately load objects.main
+    lv_scr_load(objects.main);
+
+    // 8. ESP-NOW
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     if (esp_now_init() == ESP_OK) {
         esp_now_register_recv_cb(OnDataRecv);
+        Serial.println("[SETUP] ESP-NOW receiver registered.");
+    } else {
+        Serial.println("[ERROR] Failed to initialize ESP-NOW!");
     }
+
+    Serial.println("[SETUP] Setup complete! Dual screens running.");
 }
 
 // =========================================================================
@@ -515,57 +583,56 @@ void setup() {
 void loop() {
     uint32_t now = millis();
 
-    // ---- ESP-NOW link supervision ------------------------------------------
-    // No channel-hop loop here (unlike xiao-round-gauge's ESPDASH_NODE_WIFI=1
-    // branch): this node never turns Wi-Fi on, so it never leaves the fixed
-    // ESPDASH_ESPNOW_CHANNEL locked in setup() and there's nothing to scan.
     bool live = ever_linked && (now - last_pkt_rx_time <= LINK_TIMEOUT_MS);
     LinkState link = live ? LINK_LIVE : (ever_linked ? LINK_LOST : LINK_SEARCHING);
     bool is_demo = (link == LINK_SEARCHING);
 
-    // Demo sweep - animates the gauges when no gateway is present. Ported
-    // verbatim from xiao-round-gauge/src/main.cpp:639-649.
-    EspDashTelemetry active_pkt = {0};
-    if (is_demo) {
-        float phase = now * 0.002f;
-        active_pkt.rpm = (uint16_t)(3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500);
-        active_pkt.speed_kmh_x10 = (uint16_t)((90 + sin(phase * 0.8f) * 40) * 10);
-        active_pkt.water_temp_x10 = (int16_t)((92 + sin(phase * 0.2f) * 6) * 10);
-        active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
-        active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
-        active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-        active_pkt.fuel_consumption_x10 = (uint8_t)(85 + sin(phase * 0.1f) * 20);
-        active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000); // Dynamic 11.2V - 14.8V sweep
-        active_pkt.gear = (uint8_t)(5 + ((int)(now * 0.0004f) % 6));
-        active_pkt.ambient_temp = (int8_t)(20 + sin(phase * 0.05f) * 8);
-    } else {
-        active_pkt = current_pkt;
+    // Rate-limit UI updates to 50Hz (every 20ms) for smooth animation sweep
+    static EspDashTelemetry active_pkt = {0};
+    static uint32_t last_ui_update = 0;
+    if (now - last_ui_update >= 20) {
+        last_ui_update = now;
+
+        if (is_demo) {
+            float phase = now * 0.002f;
+            active_pkt.rpm = (uint16_t)(3000 + sin(phase) * 2800 + sin(phase * 3.0f) * 500);
+            active_pkt.speed_kmh_x10 = (uint16_t)((90 + sin(phase * 0.8f) * 40) * 10);
+            active_pkt.water_temp_x10 = (int16_t)((92 + sin(phase * 0.2f) * 6) * 10);
+            active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
+            active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
+            active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
+            active_pkt.fuel_consumption_x10 = (uint8_t)(85 + sin(phase * 0.1f) * 20);
+            active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000);
+            active_pkt.gear = (uint8_t)(3 + ((int)(now * 0.0004f) % 4));
+            active_pkt.ambient_temp = (int8_t)(22 + sin(phase * 0.05f) * 6);
+        } else {
+            active_pkt = current_pkt;
+        }
+
+        update_dual_ui(active_pkt, link, is_demo);
     }
 
-#if !XIAO_DUAL_SEAM_TEST
-    update_placeholder_ui(active_pkt, link);
-#endif
     lv_timer_handler();
 
-    // ---- Periodic link + frame-rate health logger --------------------------
     static uint32_t last_link_log = 0, last_pkt_count = 0, last_frame_count = 0;
     if (now - last_link_log >= 2000) {
         uint32_t n = pkt_count;
         uint32_t f = g_frame_count;
         float hz = (n - last_pkt_count) * 1000.0f / (now - last_link_log);
         float fps = (f - last_frame_count) * 1000.0f / (now - last_link_log);
+        float temp_c = temperatureRead();
         last_link_log = now;
         last_pkt_count = n;
         last_frame_count = f;
         const char *st = (link == LINK_LIVE) ? "LIVE"
-                       : (link == LINK_LOST) ? "LOST" : "SEARCHING";
-        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu gaps:%lu payload:%u fps:%.1f "
-                      "rpm:%u spd:%.1f gear:%u thr:%u\n",
-                      st, actual_channel(), hz, (unsigned long)n,
-                      (unsigned long)pkt_gaps, current_payload_len, fps,
-                      current_pkt.rpm, current_pkt.speed_kmh_x10 / 10.0f,
-                      current_pkt.gear, current_pkt.throttle_pct);
+                       : (link == LINK_LOST) ? "LOST" : "SEARCHING (DEMO)";
+        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu fps:%.1f temp:%.1fC | A: rpm:%u spd:%.1f thr:%u%% eff:%.1fL | B: cool:%dC brk:%u%% rng:%ukm\n",
+                      st, actual_channel(), hz, (unsigned long)n, fps, temp_c,
+                      active_pkt.rpm, active_pkt.speed_kmh_x10 / 10.0f, active_pkt.throttle_pct,
+                      active_pkt.fuel_consumption_x10 / 10.0f,
+                      active_pkt.water_temp_x10 / 10, active_pkt.brake_pct,
+                      (uint16_t)((65 * 50.0f / 100.0f) / 7.2f * 100.0f));
     }
 
-    delay(5);
+    delay(2);
 }
