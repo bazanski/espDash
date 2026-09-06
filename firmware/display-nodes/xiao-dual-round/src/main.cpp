@@ -120,10 +120,10 @@ static uint32_t get_civic_coolant_color(int16_t temp_c) {
     else return 0xff1744; // Overheating warning (Red)
 }
 
-static uint32_t get_civic_fuel_level_color(uint8_t fuel_pct) {
-    if (fuel_pct >= 35) return 0x00e676; // Plenty of fuel (Green)
-    else if (fuel_pct >= 18) return 0xffd600; // Quarter tank (Gold)
-    else return 0xff1744; // Low fuel reserve warning (Red)
+static uint32_t get_civic_fuel_level_color(uint8_t fuel_pct, bool low_fuel_warning = false) {
+    if (low_fuel_warning || fuel_pct < 15) return 0xff1744; // Low fuel reserve warning (Red)
+    else if (fuel_pct <= 25) return 0xffd600; // Quarter tank (Gold)
+    else return 0x00e676; // Plenty of fuel (Green)
 }
 
 static void setup_arc_style(lv_obj_t *arc, int16_t range_min, int16_t range_max, uint32_t track_color, uint32_t indic_color, lv_coord_t arc_w) {
@@ -277,12 +277,24 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
     uint32_t coolant_col = get_civic_coolant_color(coolant_c);
     uint32_t brake_col = get_civic_brake_color(pkt.brake_pct);
 
-    // Fuel level (simulated/demo until gateway CAN 0x1A6 is added)
-    uint8_t fuel_pct = is_demo ? (uint8_t)(65 + sin(millis() * 0.0003f) * 10) : 65;
-    uint32_t fuel_col = get_civic_fuel_level_color(fuel_pct);
+    // Fuel level (decoded from Proto v2.4 CAN 0x1A6)
+    bool fuel_valid = is_demo || (ESPDASH_HAS(current_payload_len, flags2) && (pkt.flags2 & ESPDASH_FLAG2_FUEL_VALID));
+    bool low_fuel = (ESPDASH_HAS(current_payload_len, flags2) && (pkt.flags2 & ESPDASH_FLAG2_LOW_FUEL));
+    uint8_t fuel_pct = 0;
+    if (is_demo) {
+        fuel_pct = pkt.fuel_level_pct;
+        if (fuel_pct < 15) low_fuel = true;
+    } else if (fuel_valid) {
+        fuel_pct = (pkt.fuel_level_pct > 100) ? 100 : pkt.fuel_level_pct;
+    }
+    uint32_t fuel_col = get_civic_fuel_level_color(fuel_pct, low_fuel);
 
-    // Remaining range (distance to empty in km): calculated from fuel level
-    uint16_t range_km = (uint16_t)((fuel_pct * 50.0f / 100.0f) / 7.2f * 100.0f);
+    // Remaining range (distance to empty in km): calculated dynamically from fuel level & consumption
+    // Nominal Civic 9G fuel tank = 50.0 L (0.5 L per 1% fuel)
+    float avg_cons = (pkt.fuel_consumption_x10 >= 20 && pkt.fuel_consumption_x10 <= 250)
+                     ? (pkt.fuel_consumption_x10 / 10.0f)
+                     : 7.2f; // Fallback to 7.2 L/100km if not available yet
+    uint16_t range_km = (uint16_t)((fuel_pct * 50.0f / 100.0f) / avg_cons * 100.0f);
 
     if (objects.coolant_arc) {
         lv_arc_set_value(objects.coolant_arc, coolant_c);
@@ -310,10 +322,18 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
     }
 
     if (objects.left_distance_value) {
-        lv_label_set_text_fmt(objects.left_distance_value, "%d", range_km);
+        if (fuel_valid) {
+            lv_label_set_text_fmt(objects.left_distance_value, "%d", range_km);
+        } else {
+            lv_label_set_text_static(objects.left_distance_value, "--");
+        }
     }
     if (objects.fuel_value) {
-        lv_label_set_text_fmt(objects.fuel_value, "%d", fuel_pct);
+        if (fuel_valid) {
+            lv_label_set_text_fmt(objects.fuel_value, "%d", fuel_pct);
+        } else {
+            lv_label_set_text_static(objects.fuel_value, "--");
+        }
     }
     if (objects.brake_value) {
         lv_label_set_text_fmt(objects.brake_value, "%d", pkt.brake_pct);
@@ -605,6 +625,11 @@ void loop() {
             active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000);
             active_pkt.gear = (uint8_t)(3 + ((int)(now * 0.0004f) % 4));
             active_pkt.ambient_temp = (int8_t)(22 + sin(phase * 0.05f) * 6);
+            active_pkt.fuel_level_pct = (uint8_t)(65 + sin(phase * 0.08f) * 25);
+            active_pkt.flags2 = ESPDASH_FLAG2_FUEL_VALID;
+            if (active_pkt.fuel_level_pct < 15) {
+                active_pkt.flags2 |= ESPDASH_FLAG2_LOW_FUEL;
+            }
         } else {
             active_pkt = current_pkt;
         }
@@ -626,12 +651,15 @@ void loop() {
         last_frame_count = f;
         const char *st = (link == LINK_LIVE) ? "LIVE"
                        : (link == LINK_LOST) ? "LOST" : "SEARCHING (DEMO)";
-        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu fps:%.1f temp:%.1fC | A: rpm:%u spd:%.1f thr:%u%% eff:%.1fL | B: cool:%dC brk:%u%% rng:%ukm\n",
+        float avg_l100 = (active_pkt.fuel_consumption_x10 >= 20 && active_pkt.fuel_consumption_x10 <= 250)
+                         ? (active_pkt.fuel_consumption_x10 / 10.0f) : 7.2f;
+        uint16_t est_rng = (uint16_t)((active_pkt.fuel_level_pct * 50.0f / 100.0f) / avg_l100 * 100.0f);
+        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu fps:%.1f temp:%.1fC | A: rpm:%u spd:%.1f thr:%u%% eff:%.1fL | B: cool:%dC brk:%u%% fuel:%u%% rng:%ukm\n",
                       st, actual_channel(), hz, (unsigned long)n, fps, temp_c,
                       active_pkt.rpm, active_pkt.speed_kmh_x10 / 10.0f, active_pkt.throttle_pct,
                       active_pkt.fuel_consumption_x10 / 10.0f,
                       active_pkt.water_temp_x10 / 10, active_pkt.brake_pct,
-                      (uint16_t)((65 * 50.0f / 100.0f) / 7.2f * 100.0f));
+                      active_pkt.fuel_level_pct, est_rng);
     }
 
     delay(2);
