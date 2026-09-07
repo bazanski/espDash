@@ -92,11 +92,12 @@ static uint32_t get_civic_rpm_color(uint16_t rpm) {
 }
 
 static uint32_t get_civic_efficiency_color(float l_per_100km) {
-    if (l_per_100km <= 6.5f) return 0x00e676; // Bright Pure Green
-    else if (l_per_100km <= 8.8f) return 0x76ff03; // Lime Green
-    else if (l_per_100km <= 12.5f) return 0xffd600; // Gold / Yellow
-    else if (l_per_100km <= 16.5f) return 0xff9100; // Orange
-    else return 0xff1744; // Vivid Red
+    if (l_per_100km <= 0.0f) return 0x6b7d96; // Inactive / No data (Grey)
+    else if (l_per_100km <= 6.5f) return 0x00e676; // Bright Pure Green (Exceptional eco)
+    else if (l_per_100km <= 8.8f) return 0x76ff03; // Lime Green (Good economy)
+    else if (l_per_100km <= 12.0f) return 0xffd600; // Gold / Yellow (Average)
+    else if (l_per_100km <= 16.0f) return 0xff9100; // Orange (Heavy)
+    else return 0xff1744; // Vivid Red (High load)
 }
 
 static uint32_t get_civic_throttle_color(uint8_t thr_pct) {
@@ -213,6 +214,121 @@ static void disp_monitor_cb(lv_disp_drv_t *disp_drv, uint32_t time_ms, uint32_t 
     g_frame_count++;
 }
 
+// =========================================================================
+// AUTOMOTIVE FUEL LEVEL SLOSH FILTER
+// =========================================================================
+// Mitigates float arm sloshing in the fuel tank under braking, acceleration,
+// and cornering. Uses OEM-style 3-stage damping:
+// 1. Boot / Key-On Anchor: Averages first 2.5 seconds of stationary readings.
+// 2. Asymmetric Slosh Rejection: When vehicle is driving, rejects upward spikes
+//    from fuel sloshing forward/backward (fuel level cannot physically rise).
+//    Slow downward tracking bounded by realistic fuel consumption.
+// 3. Stationary Refuel Detection: Fast-ramps when persistent rise >= +5% is
+//    detected while stopped (speed <= 2.0 km/h) for >= 4 seconds.
+// 4. Integer Display Hysteresis: Prevents +/-1% jitter on digital 7-segment.
+class AutomotiveFuelFilter {
+public:
+    void reset() {
+        _initialized = false;
+        _init_start_ms = 0;
+        _init_sum = 0.0f;
+        _init_count = 0;
+        _filtered_level = 0.0f;
+        _display_pct = 0;
+        _refuel_candidate_start_ms = 0;
+        _last_update_ms = 0;
+    }
+
+    void update(uint8_t raw_fuel_pct, uint16_t speed_kmh_x10, uint32_t now_ms) {
+        if (raw_fuel_pct > 100) raw_fuel_pct = 100;
+
+        if (!_initialized) {
+            if (_init_start_ms == 0) {
+                _init_start_ms = now_ms;
+                _init_sum = 0.0f;
+                _init_count = 0;
+            }
+            _init_sum += raw_fuel_pct;
+            _init_count++;
+            _last_update_ms = now_ms;
+
+            // Anchor baseline after 2.5 seconds or at least 80 samples
+            if ((now_ms - _init_start_ms >= 2500) || _init_count >= 80) {
+                _filtered_level = _init_sum / (float)_init_count;
+                _display_pct = (uint8_t)(_filtered_level + 0.5f);
+                _initialized = true;
+            } else {
+                _filtered_level = _init_sum / (float)_init_count;
+                _display_pct = (uint8_t)(_filtered_level + 0.5f);
+            }
+            return;
+        }
+
+        float dt_sec = (_last_update_ms > 0) ? ((now_ms - _last_update_ms) / 1000.0f) : 0.05f;
+        _last_update_ms = now_ms;
+        if (dt_sec <= 0.0f || dt_sec > 1.0f) dt_sec = 0.05f;
+
+        bool is_stationary = (speed_kmh_x10 <= 20); // <= 2.0 km/h
+
+        // Check for genuine refuel: car is stationary and raw level is persistently higher
+        if (is_stationary && raw_fuel_pct >= (_filtered_level + 4.5f)) {
+            if (_refuel_candidate_start_ms == 0) {
+                _refuel_candidate_start_ms = now_ms;
+            } else if (now_ms - _refuel_candidate_start_ms >= 4000) {
+                // Persistent rise for >= 4 seconds while stopped -> refuel tracking
+                float refuel_alpha = 0.15f * (dt_sec / 0.05f);
+                if (refuel_alpha > 0.5f) refuel_alpha = 0.5f;
+                _filtered_level += (raw_fuel_pct - _filtered_level) * refuel_alpha;
+            }
+        } else {
+            _refuel_candidate_start_ms = 0;
+
+            if (raw_fuel_pct > _filtered_level) {
+                // Asymmetric slosh rejection: fuel sloshes upward under motion.
+                // Heavily suppress upward spikes while driving (fuel cannot increase).
+                float alpha_up = is_stationary ? 0.002f : 0.0001f;
+                _filtered_level += (raw_fuel_pct - _filtered_level) * alpha_up * (dt_sec / 0.05f);
+            } else {
+                // Downward motion: real consumption or slosh dip.
+                // Rate-limited to max plausible consumption (~0.015% per second, i.e. 0.9% per min)
+                float diff = _filtered_level - raw_fuel_pct;
+                float alpha_down = is_stationary ? 0.005f : 0.0015f;
+                float step = diff * alpha_down * (dt_sec / 0.05f);
+                float max_step = 0.015f * dt_sec;
+                if (step > max_step) step = max_step;
+                _filtered_level -= step;
+            }
+        }
+
+        if (_filtered_level < 0.0f) _filtered_level = 0.0f;
+        if (_filtered_level > 100.0f) _filtered_level = 100.0f;
+
+        // Display hysteresis: require delta >= 0.6% to step integer
+        float disp_diff = _filtered_level - (float)_display_pct;
+        if (disp_diff >= 0.6f) {
+            _display_pct++;
+        } else if (disp_diff <= -0.6f && _display_pct > 0) {
+            _display_pct--;
+        }
+    }
+
+    uint8_t get_display_pct() const { return _display_pct; }
+    float get_filtered_level() const { return _filtered_level; }
+    bool is_initialized() const { return _initialized; }
+
+private:
+    bool     _initialized = false;
+    uint32_t _init_start_ms = 0;
+    float    _init_sum = 0.0f;
+    uint16_t _init_count = 0;
+    float    _filtered_level = 0.0f;
+    uint8_t  _display_pct = 0;
+    uint32_t _refuel_candidate_start_ms = 0;
+    uint32_t _last_update_ms = 0;
+};
+
+static AutomotiveFuelFilter g_fuel_filter;
+
 // ============================================================================
 // DUAL SCREEN TELEMETRY DISPATCH (EEZ STUDIO INTEGRATION)
 // ============================================================================
@@ -231,8 +347,18 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
     // ---- SCREEN A (Top Panel: Driving Dynamics) ----
     uint32_t rpm_col = get_civic_rpm_color(pkt.rpm);
     uint32_t thr_col = get_civic_throttle_color(pkt.throttle_pct);
-    uint8_t eff_x10 = pkt.fuel_consumption_x10;
-    uint32_t eff_col = get_civic_efficiency_color(eff_x10 / 10.0f);
+
+    // Convert fuel consumption from km/L x10 (CAN 0x324) to L/100km x10:
+    // (L/100km * 10) = 10000 / (km/L * 10)
+    uint8_t raw_kml_x10 = pkt.fuel_consumption_x10;
+    uint8_t eff_l100_x10 = 0;
+    if (raw_kml_x10 >= 25) { // >= 2.5 km/L
+        uint16_t conv = 10000 / raw_kml_x10;
+        eff_l100_x10 = (conv > 250) ? 250 : (uint8_t)conv;
+    } else if (raw_kml_x10 > 0) {
+        eff_l100_x10 = 250; // clamp to 25.0 L/100km max
+    }
+    uint32_t eff_col = get_civic_efficiency_color(eff_l100_x10 / 10.0f);
 
     if (objects.rpm_arc) {
         lv_arc_set_value(objects.rpm_arc, pkt.rpm);
@@ -251,7 +377,7 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
         }
     }
     if (objects.eff_arc) {
-        lv_arc_set_value(objects.eff_arc, eff_x10 / 10);
+        lv_arc_set_value(objects.eff_arc, eff_l100_x10 / 10);
         if (eff_col != prev_eff_col) {
             prev_eff_col = eff_col;
             lv_obj_set_style_arc_color(objects.eff_arc, lv_color_hex(eff_col), LV_PART_INDICATOR);
@@ -263,7 +389,11 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
         lv_label_set_text_fmt(objects.speed_value, "%d", pkt.speed_kmh_x10 / 10);
     }
     if (objects.eff_value) {
-        lv_label_set_text_fmt(objects.eff_value, "%d.%d", eff_x10 / 10, eff_x10 % 10);
+        if (eff_l100_x10 > 0) {
+            lv_label_set_text_fmt(objects.eff_value, "%d.%d", eff_l100_x10 / 10, eff_l100_x10 % 10);
+        } else {
+            lv_label_set_text_static(objects.eff_value, "--.-");
+        }
     }
     if (objects.throttle_value) {
         lv_label_set_text_fmt(objects.throttle_value, "%d", pkt.throttle_pct);
@@ -277,24 +407,26 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
     uint32_t coolant_col = get_civic_coolant_color(coolant_c);
     uint32_t brake_col = get_civic_brake_color(pkt.brake_pct);
 
-    // Fuel level (decoded from Proto v2.4 CAN 0x1A6)
-    bool fuel_valid = is_demo || (ESPDASH_HAS(current_payload_len, flags2) && (pkt.flags2 & ESPDASH_FLAG2_FUEL_VALID));
-    bool low_fuel = (ESPDASH_HAS(current_payload_len, flags2) && (pkt.flags2 & ESPDASH_FLAG2_LOW_FUEL));
-    uint8_t fuel_pct = 0;
-    if (is_demo) {
-        fuel_pct = pkt.fuel_level_pct;
-        if (fuel_pct < 15) low_fuel = true;
-    } else if (fuel_valid) {
-        fuel_pct = (pkt.fuel_level_pct > 100) ? 100 : pkt.fuel_level_pct;
+    // Fuel level (filtered against tank sloshing from Proto v2.4 CAN 0x1A6)
+    bool raw_fuel_valid = is_demo || (ESPDASH_HAS(current_payload_len, flags2) && (pkt.flags2 & ESPDASH_FLAG2_FUEL_VALID));
+    uint8_t raw_fuel_pct = pkt.fuel_level_pct;
+    if (raw_fuel_pct > 100) raw_fuel_pct = 100;
+
+    if (raw_fuel_valid) {
+        g_fuel_filter.update(raw_fuel_pct, pkt.speed_kmh_x10, millis());
     }
+
+    uint8_t fuel_pct = raw_fuel_valid ? g_fuel_filter.get_display_pct() : 0;
+    float filtered_fuel_level = raw_fuel_valid ? g_fuel_filter.get_filtered_level() : 0.0f;
+    bool low_fuel = (ESPDASH_HAS(current_payload_len, flags2) && (pkt.flags2 & ESPDASH_FLAG2_LOW_FUEL)) || (fuel_pct < 13);
     uint32_t fuel_col = get_civic_fuel_level_color(fuel_pct, low_fuel);
 
-    // Remaining range (distance to empty in km): calculated dynamically from fuel level & consumption
+    // Remaining range (distance to empty in km): calculated from filtered fuel level & converted L/100km
     // Nominal Civic 9G fuel tank = 50.0 L (0.5 L per 1% fuel)
-    float avg_cons = (pkt.fuel_consumption_x10 >= 20 && pkt.fuel_consumption_x10 <= 250)
-                     ? (pkt.fuel_consumption_x10 / 10.0f)
-                     : 7.2f; // Fallback to 7.2 L/100km if not available yet
-    uint16_t range_km = (uint16_t)((fuel_pct * 50.0f / 100.0f) / avg_cons * 100.0f);
+    float avg_cons_l100 = (eff_l100_x10 >= 20 && eff_l100_x10 <= 250)
+                          ? (eff_l100_x10 / 10.0f)
+                          : 7.2f; // Fallback to 7.2 L/100km if not available yet
+    uint16_t range_km = (uint16_t)((filtered_fuel_level * 50.0f / 100.0f) / avg_cons_l100 * 100.0f);
 
     if (objects.coolant_arc) {
         lv_arc_set_value(objects.coolant_arc, coolant_c);
@@ -322,14 +454,14 @@ static void update_dual_ui(const EspDashTelemetry &pkt, LinkState link, bool is_
     }
 
     if (objects.left_distance_value) {
-        if (fuel_valid) {
+        if (raw_fuel_valid) {
             lv_label_set_text_fmt(objects.left_distance_value, "%d", range_km);
         } else {
             lv_label_set_text_static(objects.left_distance_value, "--");
         }
     }
     if (objects.fuel_value) {
-        if (fuel_valid) {
+        if (raw_fuel_valid) {
             lv_label_set_text_fmt(objects.fuel_value, "%d", fuel_pct);
         } else {
             lv_label_set_text_static(objects.fuel_value, "--");
@@ -621,11 +753,14 @@ void loop() {
             active_pkt.steering_deg = (int16_t)(sin(phase * 1.2f) * 180);
             active_pkt.throttle_pct = (uint8_t)(50 + sin(phase * 1.5f) * 45);
             active_pkt.brake_pct = (uint8_t)(max(0.0f, -sin(phase * 1.5f) * 80.0f));
-            active_pkt.fuel_consumption_x10 = (uint8_t)(85 + sin(phase * 0.1f) * 20);
+            // Demo sweep: sweep km/L between 8.5 and 15.5 km/L (raw 85 to 155)
+            // (125 = 12.5 km/L -> converts to 8.0 L/100km)
+            active_pkt.fuel_consumption_x10 = (uint8_t)(120 + sin(phase * 0.1f) * 35);
             active_pkt.battery_mv = (uint16_t)((13.0f + sin(phase * 0.8f) * 1.8f) * 1000);
             active_pkt.gear = (uint8_t)(3 + ((int)(now * 0.0004f) % 4));
             active_pkt.ambient_temp = (int8_t)(22 + sin(phase * 0.05f) * 6);
-            active_pkt.fuel_level_pct = (uint8_t)(65 + sin(phase * 0.08f) * 25);
+            // Simulate raw fuel float with sloshing (+/- 8% ripple around 65%)
+            active_pkt.fuel_level_pct = (uint8_t)(65 + sin(phase * 0.02f) * 4 + sin(phase * 1.2f) * 8);
             active_pkt.flags2 = ESPDASH_FLAG2_FUEL_VALID;
             if (active_pkt.fuel_level_pct < 15) {
                 active_pkt.flags2 |= ESPDASH_FLAG2_LOW_FUEL;
@@ -651,15 +786,17 @@ void loop() {
         last_frame_count = f;
         const char *st = (link == LINK_LIVE) ? "LIVE"
                        : (link == LINK_LOST) ? "LOST" : "SEARCHING (DEMO)";
-        float avg_l100 = (active_pkt.fuel_consumption_x10 >= 20 && active_pkt.fuel_consumption_x10 <= 250)
-                         ? (active_pkt.fuel_consumption_x10 / 10.0f) : 7.2f;
-        uint16_t est_rng = (uint16_t)((active_pkt.fuel_level_pct * 50.0f / 100.0f) / avg_l100 * 100.0f);
-        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu fps:%.1f temp:%.1fC | A: rpm:%u spd:%.1f thr:%u%% eff:%.1fL | B: cool:%dC brk:%u%% fuel:%u%% rng:%ukm\n",
+        uint8_t raw_k = active_pkt.fuel_consumption_x10;
+        float l100 = (raw_k >= 25) ? (1000.0f / raw_k) : 0.0f;
+        uint8_t disp_fuel = g_fuel_filter.get_display_pct();
+        float est_cons = (l100 >= 2.0f && l100 <= 25.0f) ? l100 : 7.2f;
+        uint16_t est_rng = (uint16_t)((disp_fuel * 50.0f / 100.0f) / est_cons * 100.0f);
+        Serial.printf("[LINK] %s ch:%u rate:%.1fHz pkts:%lu fps:%.1f temp:%.1fC | A: rpm:%u spd:%.1f thr:%u%% cons:%.1fkm/L (%.1fL/100) | B: cool:%dC brk:%u%% fuel:%u%% (raw:%u%%) rng:%ukm\n",
                       st, actual_channel(), hz, (unsigned long)n, fps, temp_c,
                       active_pkt.rpm, active_pkt.speed_kmh_x10 / 10.0f, active_pkt.throttle_pct,
-                      active_pkt.fuel_consumption_x10 / 10.0f,
+                      raw_k / 10.0f, l100,
                       active_pkt.water_temp_x10 / 10, active_pkt.brake_pct,
-                      active_pkt.fuel_level_pct, est_rng);
+                      disp_fuel, active_pkt.fuel_level_pct, est_rng);
     }
 
     delay(2);
