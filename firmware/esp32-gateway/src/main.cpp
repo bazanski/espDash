@@ -41,6 +41,8 @@
 #include <esp_wifi.h>
 #include <esp_now.h>
 #include "driver/twai.h"
+#include "driver/gpio.h"
+#include "esp_sleep.h"
 
 #if ESPDASH_GATEWAY_WIFI
 #include <WiFiMulti.h>
@@ -59,6 +61,23 @@
 static const gpio_num_t CAN_TX_PIN = GPIO_NUM_15;
 static const gpio_num_t CAN_RX_PIN = GPIO_NUM_16;
 static bool twai_installed = false;
+
+// =========================================================================
+// POWER MANAGEMENT & SLEEP
+// =========================================================================
+// Automatic sleep on CAN bus inactivity (when the car is turned off):
+//   - Tier 1: Light Sleep after 25s of silence (<1ms wake on CAN RX, no reboot)
+//   - Tier 2: Deep Sleep after 30m of silence (~150ms boot on CAN RX, ~15uA core)
+static volatile bool     power_save_auto = true;
+static volatile uint32_t last_can_rx_ms = 0;
+static volatile uint32_t total_sleep_cycles = 0;
+static char              last_wakeup_reason[48] = "POWER_ON";
+static TaskHandle_t      canRxTaskHandle = NULL;
+static TaskHandle_t      publishTaskHandle = NULL;
+
+static const uint32_t SLEEP_IDLE_TIMEOUT_MS  = 25000;    // 25s CAN silence -> sleep
+static const uint32_t BOOT_GRACE_PERIOD_MS   = 30000;    // 30s after boot before sleep allowed
+static const uint32_t DEEP_SLEEP_ESCALATE_S  = 30 * 60;  // 30 mins continuous idle -> Deep Sleep
 
 // =========================================================================
 // MODES
@@ -396,6 +415,23 @@ static void process_cmd_string(String cmd) {
         char b[64];
         snprintf(b, sizeof(b), "[LOGTEST] disabled after %lu frames\n", (unsigned long)logtest_seq);
         broadcast_line(b);
+    } else if (cmd == "POWER:AUTO" || cmd == "POWER_AUTO") {
+        power_save_auto = true;
+        broadcast_line("[POWER] Automatic sleep on CAN inactivity ENABLED (sleep after 25s silence)\n");
+    } else if (cmd == "POWER:AWAKE" || cmd == "POWER:ON" || cmd == "POWER_ON" || cmd == "POWER:0") {
+        power_save_auto = false;
+        broadcast_line("[POWER] Automatic sleep DISABLED (stay awake indefinitely)\n");
+    } else if (cmd == "POWER?" || cmd == "POWER:STATUS" || cmd == "POWER") {
+        char pbuf[160];
+        uint32_t idle = (last_can_rx_ms > 0 && millis() >= last_can_rx_ms) ? (millis() - last_can_rx_ms) : 0;
+        snprintf(pbuf, sizeof(pbuf),
+                 "[POWER] mode:%s idle:%lu ms (timeout:%lu ms) sleep_cycles:%lu last_wakeup:%s\n",
+                 power_save_auto ? "AUTO" : "AWAKE",
+                 (unsigned long)idle,
+                 (unsigned long)SLEEP_IDLE_TIMEOUT_MS,
+                 (unsigned long)total_sleep_cycles,
+                 last_wakeup_reason);
+        broadcast_line(pbuf);
     } else if (cmd == "STATS") {
         char buf[300];
 #if ESPDASH_GATEWAY_WIFI
@@ -403,7 +439,7 @@ static void process_cmd_string(String cmd) {
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu wifi_fallback:%s "
                  "log:%s batches:%lu logframes:%lu logdefer:%lu rx_any:%lu rx_cmd:%lu "
-                 "injected:%lu retries:%lu txwait:%lu lasterr:%d\n",
+                 "injected:%lu retries:%lu txwait:%lu lasterr:%d pwr:%s cycles:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -420,7 +456,9 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)logtest_seq,
                  (unsigned long)canlog_tx_retries,
                  (unsigned long)canlog_tx_waits,
-                 canlog_last_err);
+                 canlog_last_err,
+                 power_save_auto ? "auto" : "awake",
+                 (unsigned long)total_sleep_cycles);
 #else
         // No wifi_fallback field: with no Wi-Fi station ever attempted,
         // there's no connection to fall back from. espnow_send_fail is still
@@ -430,7 +468,7 @@ static void process_cmd_string(String cmd) {
                  "[STATS] decoded:%lu cksum_rejects:%lu ring_dropped:%lu twai_qfull:%lu "
                  "tx_trunc:%lu espnow_fail:%lu "
                  "log:%s batches:%lu logframes:%lu logdefer:%lu rx_any:%lu rx_cmd:%lu "
-                 "injected:%lu retries:%lu txwait:%lu lasterr:%d\n",
+                 "injected:%lu retries:%lu txwait:%lu lasterr:%d pwr:%s cycles:%lu\n",
                  (unsigned long)g_snapshot.frames_decoded,
                  (unsigned long)g_snapshot.checksum_rejects,
                  (unsigned long)raw_dropped,
@@ -446,7 +484,9 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)logtest_seq,
                  (unsigned long)canlog_tx_retries,
                  (unsigned long)canlog_tx_waits,
-                 canlog_last_err);
+                 canlog_last_err,
+                 power_save_auto ? "auto" : "awake",
+                 (unsigned long)total_sleep_cycles);
 #endif
         broadcast_line(buf);
     }
@@ -509,6 +549,7 @@ static void canRxTask(void *arg) {
         if (twai_receive(&rx, pdMS_TO_TICKS(10)) != ESP_OK) continue;
 
         uint32_t now = millis();
+        last_can_rx_ms = now;
 
         f.id  = rx.identifier;
         f.dlc = rx.data_length_code > 8 ? 8 : rx.data_length_code;
@@ -1100,6 +1141,114 @@ static void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
     }
 }
 
+// =========================================================================
+// POWER MANAGEMENT: ENTER SLEEP
+// =========================================================================
+static void init_esp_now();
+
+static void enter_gateway_sleep() {
+    uint32_t idle = (last_can_rx_ms > 0 && millis() >= last_can_rx_ms) ? (millis() - last_can_rx_ms) : 0;
+    Serial.printf("[POWER] CAN bus silent for %lu ms (threshold %lu ms). Preparing sleep...\n",
+                  (unsigned long)idle, (unsigned long)SLEEP_IDLE_TIMEOUT_MS);
+    Serial.flush();
+
+    // 1. Drain/flush any active logging so partial buffers aren't stranded
+    if (canlog_active()) {
+        canlog_send_batch();
+    }
+
+    // 2. Suspend worker tasks so they don't access TWAI / Wi-Fi while shut down
+    if (canRxTaskHandle) vTaskSuspend(canRxTaskHandle);
+    if (publishTaskHandle) vTaskSuspend(publishTaskHandle);
+
+    // 3. Stop and uninstall TWAI driver
+    if (twai_installed) {
+        twai_stop();
+        twai_driver_uninstall();
+        twai_installed = false;
+        Serial.println("[POWER] TWAI driver uninstalled.");
+    }
+
+    // 4. Stop ESP-NOW and Wi-Fi radio
+    esp_now_deinit();
+    WiFi.disconnect(true, true);
+    Serial.println("[POWER] Wi-Fi & ESP-NOW radios powered down.");
+
+    // 5. Configure CAN_RX (GPIO 16) for wake-up.
+    // In CAN recessive state, transceiver pulls RX HIGH.
+    // When a frame arrives (dominant SOF bit), transceiver pulls RX LOW.
+    gpio_reset_pin(CAN_RX_PIN);
+    gpio_set_direction(CAN_RX_PIN, GPIO_MODE_INPUT);
+    gpio_pullup_en(CAN_RX_PIN);
+    gpio_wakeup_enable(CAN_RX_PIN, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    // 6. Enable 10-minute timer wakeup so we can track prolonged parking for Deep Sleep
+    const uint64_t WAKEUP_TIMER_US = 10ULL * 60ULL * 1000000ULL; // 10 minutes
+    esp_sleep_enable_timer_wakeup(WAKEUP_TIMER_US);
+
+    total_sleep_cycles++;
+    uint32_t sleep_start = millis();
+    uint32_t accumulated_sleep_sec = 0;
+
+    Serial.println("[POWER] Entering Light Sleep. Wakes instantly (<1ms) on CAN_RX (GPIO16 LOW)...");
+    Serial.flush();
+
+    while (true) {
+        esp_light_sleep_start();
+
+        esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+        if (cause == ESP_SLEEP_WAKEUP_GPIO) {
+            snprintf(last_wakeup_reason, sizeof(last_wakeup_reason), "GPIO_CAN_RX (Light Sleep)");
+            break; // CAN bus activity detected!
+        } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+            accumulated_sleep_sec += 10 * 60;
+            if (accumulated_sleep_sec >= DEEP_SLEEP_ESCALATE_S) {
+                // Car has been parked continuously for >= 30 minutes.
+                // Escalate to Deep Sleep (shuts down CPU core completely to ~15uA).
+                Serial.println("[POWER] Parked >30m. Escalating to Deep Sleep (RTC EXT0 on GPIO16)...");
+                Serial.flush();
+                esp_sleep_enable_ext0_wakeup(CAN_RX_PIN, 0); // Wake on GPIO16 LOW
+                esp_deep_sleep_start();
+                // Never returns: ESP32-S3 reboots on wake
+            }
+            // Re-arm wakeups and go back to sleep
+            esp_sleep_enable_gpio_wakeup();
+            esp_sleep_enable_timer_wakeup(WAKEUP_TIMER_US);
+        } else {
+            snprintf(last_wakeup_reason, sizeof(last_wakeup_reason), "OTHER (%d)", (int)cause);
+            break;
+        }
+    }
+
+    // --- WAKE UP & RESTORATION ---
+    gpio_wakeup_disable(CAN_RX_PIN);
+
+    // 7. Restart Wi-Fi into STA mode and reinitialize ESP-NOW
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_channel(ESPDASH_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    init_esp_now();
+
+    // 8. Reinstall TWAI driver
+    if (install_twai()) {
+        Serial.println("[POWER] TWAI driver reinstalled.");
+    } else {
+        Serial.println("[POWER] TWAI reinstall FAILED!");
+    }
+
+    // 9. Reset CAN activity timestamp
+    last_can_rx_ms = millis();
+
+    // 10. Resume worker tasks
+    if (canRxTaskHandle) vTaskResume(canRxTaskHandle);
+    if (publishTaskHandle) vTaskResume(publishTaskHandle);
+
+    Serial.printf("[POWER] Resumed! Slept %lu ms. Worker tasks active.\n",
+                  (unsigned long)(millis() - sleep_start));
+}
+
 static void init_esp_now() {
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESP-NOW] Initialization failed!");
@@ -1124,6 +1273,16 @@ static void init_esp_now() {
 void setup() {
     Serial.begin(115200);
     delay(500);
+
+    // Check if we booted from Deep Sleep via CAN RX activity
+    esp_sleep_wakeup_cause_t boot_cause = esp_sleep_get_wakeup_cause();
+    if (boot_cause == ESP_SLEEP_WAKEUP_EXT0) {
+        snprintf(last_wakeup_reason, sizeof(last_wakeup_reason), "EXT0_CAN_RX (Deep Sleep)");
+        Serial.println("[POWER] Booting from Deep Sleep via CAN RX activity (EXT0 on GPIO16)!");
+    } else {
+        snprintf(last_wakeup_reason, sizeof(last_wakeup_reason), "POWER_ON / RESET");
+    }
+    last_can_rx_ms = millis();
 
     can_decode_init(&g_state);
     can_decode_init(&g_snapshot);
@@ -1216,8 +1375,8 @@ void setup() {
     // Nothing is lost by this placement: canRxTask at priority 10 preempts
     // publishTask at 5, so a blocking write still cannot delay CAN reception,
     // which is the entire point of the split.
-    xTaskCreatePinnedToCore(canRxTask,   "canRx",   4096, NULL, 10, NULL, 1);
-    xTaskCreatePinnedToCore(publishTask, "publish", 8192, NULL, 5,  NULL, 1);
+    xTaskCreatePinnedToCore(canRxTask,   "canRx",   4096, NULL, 10, &canRxTaskHandle, 1);
+    xTaskCreatePinnedToCore(publishTask, "publish", 8192, NULL, 5,  &publishTaskHandle, 1);
 
     Serial.println("[SYSTEM] Gateway ready. canRxTask@core1 prio10, publishTask@core1 prio5.");
 }
@@ -1299,6 +1458,19 @@ void loop() {
             if (st.state == TWAI_STATE_BUS_OFF)      twai_initiate_recovery();
             else if (st.state == TWAI_STATE_STOPPED) twai_start();
         }
+    }
+
+    // Power management check:
+    // If auto power-save is active and the CAN bus has been completely silent
+    // for at least SLEEP_IDLE_TIMEOUT_MS, enter low-power sleep.
+    bool can_sleep = power_save_auto && !demo_mode && !logtest_mode && !canlog_manual;
+#if ESPDASH_GATEWAY_WIFI
+    can_sleep = can_sleep && !ota_in_progress;
+#endif
+    if (can_sleep && (now > BOOT_GRACE_PERIOD_MS) && ((now - last_can_rx_ms) >= SLEEP_IDLE_TIMEOUT_MS)) {
+        enter_gateway_sleep();
+        now = millis();
+        last_diag = now;
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
