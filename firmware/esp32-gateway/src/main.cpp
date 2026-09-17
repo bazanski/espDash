@@ -63,6 +63,16 @@ static const gpio_num_t CAN_RX_PIN = GPIO_NUM_16;
 static bool twai_installed = false;
 
 // =========================================================================
+// INA228 BATTERY VOLTAGE MONITOR (I2C)
+// =========================================================================
+#include <Wire.h>
+static const gpio_num_t INA_SDA_PIN = GPIO_NUM_1;
+static const gpio_num_t INA_SCL_PIN = GPIO_NUM_2;
+static uint8_t  g_ina_addr = 0x40;
+static bool     g_ina_present = false;
+static volatile uint16_t g_ina_battery_mv = 0;
+
+// =========================================================================
 // POWER MANAGEMENT & SLEEP
 // =========================================================================
 // Automatic sleep on CAN bus inactivity (when the car is turned off):
@@ -341,6 +351,111 @@ static void apply_demo(CanDecodeState *s, float sim_t) {
 }
 
 // =========================================================================
+// INA228 BATTERY SENSOR DRIVER
+// =========================================================================
+static bool ina228_read_u16(uint8_t reg, uint16_t *val) {
+    Wire.beginTransmission(g_ina_addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint8_t)g_ina_addr, (uint8_t)2) != 2) return false;
+    *val = ((uint16_t)Wire.read() << 8) | Wire.read();
+    return true;
+}
+
+static bool ina228_read_u24(uint8_t reg, uint32_t *val) {
+    Wire.beginTransmission(g_ina_addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint8_t)g_ina_addr, (uint8_t)3) != 3) return false;
+    *val = ((uint32_t)Wire.read() << 16) | ((uint32_t)Wire.read() << 8) | Wire.read();
+    return true;
+}
+
+static bool ina228_write_u16(uint8_t reg, uint16_t val) {
+    Wire.beginTransmission(g_ina_addr);
+    Wire.write(reg);
+    Wire.write((uint8_t)(val >> 8));
+    Wire.write((uint8_t)(val & 0xFF));
+    return (Wire.endTransmission() == 0);
+}
+
+static uint16_t ina228_read_vbus_mv() {
+    if (!g_ina_present) return 0;
+    uint32_t raw = 0;
+    if (!ina228_read_u24(0x05, &raw)) {
+        return g_ina_battery_mv; // keep last known value on transient read glitch
+    }
+    // INA228 VBUS: 24-bit register, bits 23:4 are data (20-bit value), 195.3125 uV / LSB
+    float mv = (float)(raw >> 4) * 0.1953125f;
+    return (uint16_t)(mv + 0.5f);
+}
+
+static void init_ina228() {
+    Serial.printf("[INA228] Initializing I2C on SDA=GPIO%d, SCL=GPIO%d (100kHz)...\n",
+                  INA_SDA_PIN, INA_SCL_PIN);
+    Wire.begin(INA_SDA_PIN, INA_SCL_PIN, 100000);
+    Wire.setTimeOut(25);
+
+    uint8_t found_count = 0;
+    g_ina_present = false;
+
+    Serial.println("[I2C] Scanning bus (0x08 - 0x77)...");
+    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[I2C] Responsive device found at 0x%02X\n", addr);
+            found_count++;
+
+            // Check if device matches INA228 ID registers:
+            // Reg 0x3E (MANUFACTURER_ID) == 0x5449 ("TI")
+            // Reg 0x3F (DEVICE_ID) bits 15:4 == 0x228
+            uint8_t prev = g_ina_addr;
+            g_ina_addr = addr;
+            uint16_t mfg = 0, dev = 0;
+            if (ina228_read_u16(0x3E, &mfg) && ina228_read_u16(0x3F, &dev)) {
+                if (mfg == 0x5449 && ((dev >> 4) == 0x228)) {
+                    g_ina_present = true;
+                    Serial.printf("[INA228] *** FOUND INA228 at 0x%02X *** (MFG: 0x%04X 'TI', DEV: 0x%04X, Rev: %u)\n",
+                                  addr, mfg, dev, (dev & 0x0F));
+                    break;
+                }
+            }
+            g_ina_addr = prev;
+        }
+    }
+
+    if (!g_ina_present && found_count > 0) {
+        // Fallback check for common INA addresses 0x40-0x45
+        for (uint8_t addr = 0x40; addr <= 0x45; addr++) {
+            Wire.beginTransmission(addr);
+            if (Wire.endTransmission() == 0) {
+                g_ina_addr = addr;
+                g_ina_present = true;
+                Serial.printf("[INA228] Binding to 0x%02X as fallback\n", addr);
+                break;
+            }
+        }
+    }
+
+    if (g_ina_present) {
+        ina228_write_u16(0x01, 0xFB68); // ensure continuous conversion mode
+        uint32_t raw = 0;
+        if (ina228_read_u24(0x05, &raw)) {
+            float mv = (float)(raw >> 4) * 0.1953125f;
+            g_ina_battery_mv = (uint16_t)(mv + 0.5f);
+            Serial.printf("[INA228] ACTIVE. Initial VBUS: raw=0x%06lX (%lu), voltage=%.3f V (%u mV)\n",
+                          (unsigned long)raw, (unsigned long)(raw >> 4),
+                          mv / 1000.0f, g_ina_battery_mv);
+        } else {
+            Serial.println("[INA228] Device responded but initial VBUS read failed.");
+        }
+    } else {
+        Serial.printf("[INA228] NOT FOUND on I2C bus (%u responsive devices found). Check wiring: SDA=IO1, SCL=IO2, 3.3V, GND.\n",
+                      found_count);
+    }
+}
+
+// =========================================================================
 // COMMANDS  (called from publishTask only)
 // =========================================================================
 static void process_cmd_string(String cmd) {
@@ -432,6 +547,21 @@ static void process_cmd_string(String cmd) {
                  (unsigned long)total_sleep_cycles,
                  last_wakeup_reason);
         broadcast_line(pbuf);
+    } else if (cmd == "INA" || cmd == "INA:GET" || cmd == "BATTERY" || cmd == "BATT") {
+        char buf[160];
+        if (g_ina_present) {
+            uint32_t raw = 0;
+            ina228_read_u24(0x05, &raw);
+            snprintf(buf, sizeof(buf),
+                     "[INA228] ADDR=0x%02X | VBUS_RAW=0x%06lX | VOLTAGE=%.3f V (%u mV)\n",
+                     g_ina_addr, (unsigned long)raw, g_ina_battery_mv / 1000.0f, g_ina_battery_mv);
+        } else {
+            snprintf(buf, sizeof(buf), "[INA228] NOT DETECTED on I2C (SDA=GPIO%d, SCL=GPIO%d)\n",
+                     INA_SDA_PIN, INA_SCL_PIN);
+        }
+        broadcast_line(buf);
+    } else if (cmd == "I2C:SCAN" || cmd == "I2CSCAN") {
+        init_ina228();
     } else if (cmd == "STATS") {
         char buf[300];
 #if ESPDASH_GATEWAY_WIFI
@@ -989,6 +1119,16 @@ static void publishTask(void *arg) {
             apply_staleness(&snap, now);
         }
 
+        // ---- 4b. Battery Voltage (INA228) -------------------------------
+        static uint32_t last_ina_read_ms = 0;
+        if (g_ina_present && (now - last_ina_read_ms >= 100)) {
+            last_ina_read_ms = now;
+            g_ina_battery_mv = ina228_read_vbus_mv();
+        }
+        if (g_ina_present) {
+            snap.battery_mv = g_ina_battery_mv;
+        }
+
         // ---- 5. ESP-NOW @20Hz -------------------------------------------
         if (now - last_espnow >= 50) {
             last_espnow = now;
@@ -1293,6 +1433,8 @@ void setup() {
     Serial.printf(" PROTO : ESP-NOW v%d.%d, %u byte packet\n",
                   ESPDASH_PROTO_MAJOR, ESPDASH_PROTO_MINOR, (unsigned)ESPDASH_PACKET_SIZE);
     Serial.println("=================================================================");
+
+    init_ina228();
 
     if (install_twai()) {
         Serial.println("[TWAI] Installed on GPIO15(TX)/GPIO16(RX), rx_queue_len=512");
