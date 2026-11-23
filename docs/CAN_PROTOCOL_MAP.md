@@ -72,12 +72,13 @@ checksum = (8 - (sum of ID nibbles + sum of all data nibbles, excluding the chec
 | **Accelerator pedal** | `0x17C` | 50 Hz | `d[0] / 255` | **Retuned on this car (2026-08-29).** Two deliberate WOT pulls into the limiter plateau at 211–213 for 2.5 s each — the pedal against its kickdown detent — and the 37-min road log holds 214 then 255 for 4.5 s through one kickdown, so the field is a plain 0–255 scale. `0x13C` b4 mirrors it exactly. The previous divisors (97, then the Si's 139) both clipped: at 139 the gauge read 100 % from 55 % of real travel | **CONFIRMED** |
 | **Wheels moving** | `0x1B0` | 25 Hz | `d[1] & 0x10` | True 89.4 % of a driving trace, agrees with `0x1D0` speed on 88.2 % of paired samples | **CONFIRMED** |
 | **Ambient temp** | `0x21E` | 10 Hz | `d[3] − 40` °C | 33 °C on 2026-08-29 with the dash reading exactly 33; 31–33 °C drifting down over the 37-min evening drive. **Was `(int8)d[4]`** — retracted, see §C and §G | **CONFIRMED** |
-| **In-car temp** | `0x21E` | 10 Hz | `d[2] − 40` °C | Same offset as ambient, one byte earlier. 24 → 19 °C over the 37-min drive as the cabin cooled; 18–19 °C on a 33 °C day. Not wired to the protocol yet — no field for it | **LOCAL** |
+| **In-car temp** | `0x21E` | 10 Hz | `d[2] − 40` °C | Same offset as ambient, one byte earlier. 24 → 19 °C over the 37-min drive as the cabin cooled; 18–19 °C on a 33 °C day. Wired in proto v2.4 as `cabin_temp` (`ESPDASH_SIG_CABIN_TEMP`) | **LOCAL** |
 | **Distance travelled** | `0x377` | 10 Hz | `BE16(d[1],d[2]) × 0.05 km` | **49.81 m/count** regressed against speed integrated over the 37-min drive: 758 counts for 37.79 km, residual ≤ 1.1 counts (55 m) across 38 samples an hour apart. Independently 48.7 m/count on `canlog_0003`. Frozen while idling in Park for 10 min. 16-bit, so it wraps every 3276 km — use deltas, not the absolute value | **CONFIRMED** |
 | **Turn signal L / R** | `0x294` | 25 Hz | `d[0] & 0x20` left, `d[0] & 0x40` right | Left-then-right in `canlog_0007`, in that order, matching the test script exactly; held for the length of the stalk hold rather than blinking, so this is the stalk request, not the lamp | **LOCAL** |
 | **Headlight level** | `0x1A6` | 50 Hz | `d[0] & 0x03`: `0`=DRL/off `1`=position `2`=low beam `3`=high beam | `canlog_0007` ramps 0→1→2→3 then back 3→2→1→0, then several more up-down switches — exactly the scripted sequence. Level 1 is inferred (the script named only DRL/low/high) | **LOCAL** |
 | **Blower fan speed** | `0x510` | 2 Hz | `d[1]`, 1–5 observed | Constant `5` in every other recording; steps through 5→1→5→1→5→4→3→2→5 only while the fan was being adjusted in `canlog_0006`. Honda's dial goes to 7; only 1–5 were exercised | **LOCAL** |
-| ~~**Battery voltage**~~ | `0x305` | 5 Hz | **retracted — not decoded** | Read `d[0] × 100` mV = "14.2 V". Retracted 2026-08-29: it is *exactly* 142 in every stationary capture weeks apart and 6–14 across the whole 37-min drive. A bitfield, not a measurement — see §C and §G | **UNMAPPED** |
+| ~~**Battery voltage**~~ | `0x305` | 5 Hz | **retracted — not on CAN** | Read `d[0] × 100` mV = "14.2 V". Retracted 2026-08-29: `0x305` is `SEATBELT_STATUS`, not voltage. 12 V battery voltage (`battery_mv`) is instead measured on the Central Gateway via an **INA228 I2C** sensor (`GPIO 1`/`GPIO 2`, addr `0x40`) | **UNMAPPED** |
+| **Seatbelt status (driver)** | `0x305` | 10 Hz | `d[0] & 0x80` = driver belt warning, `d[1] & 0x10` = unlatched, `d[1] & 0x20` = latched | Observed in fixtures: stationary unbuckled (`civic9_user_2014`) holds `0x8E 0x14`; driving buckled (`civic9_user_2014_lowfuel`) holds `0x0E 0x24`. Matches opendbc `SEATBELT_STATUS`; passenger/rear latch bits in `d[0]` (`0x06`/`0x4E`) are not yet individually scripted/wired | **LOCAL** |
 | **Gear selector** | `0x188` | 50 Hz | `d[3]`: `01`=P `02`=R `04`=N `08`=D `00`=S | **Corrected by an on-road test (2026-08-09)** — every position was off by one against the original mapping. No external reference exists (`0x188` is absent from the Si, which is manual), so a driving car is the only oracle for this signal | **ON-ROAD** |
 | **Engine RPM (alt)** | `0x1DC` | 25 Hz | `BE16(d[1],d[2])` | Tracks `0x17C` within a few rpm on both cars. Used only if `0x17C` goes stale | **CONFIRMED** |
 | **VSA / ESP disabled** | `0x1A4` | 25 Hz | `d[3] & 0x10` | opendbc `ESP_DISABLED` bit 28. Constant 0 across every capture, so the bit position is **unverified** | **REFERENCE** |
@@ -118,9 +119,9 @@ display node can render it today. **The `key` column is the identifier used ever
 | `abs` `tc` `cel` | Warning lamps | flag | — | **UNMAPPED** — always false | v2.0 |
 | `vsa` | VSA / ESP disabled | flag | — | `0x1A4` b3 bit4, unverified | v2.0 |
 
-**Not available and not pretended to be:** engine oil temperature (diagnostic PID only, and the
-gateway is listen-only), 12 V battery voltage (§C — retracted), distance-to-empty (searched every
-bit-field on 2026-08-30, absent; the cluster computes it internally), ABS/TC/CEL (§B).
+**Not available on CAN (and not pretended to be on the bus):** engine oil temperature (diagnostic PID only, and the
+gateway is listen-only), 12 V battery voltage on F-CAN (§C — `0x305` retracted; instead measured directly on the Gateway by an **INA228 I2C sensor** into `battery_mv`), distance-to-empty (searched every
+bit-field on 2026-08-30, absent; the cluster computes it internally, while slow displays like `crowpanel-epaper-370` estimate DTE from `fuel_litres` and `fuel_avg`), ABS/TC/CEL (§B).
 
 `odo_km` is a **delta source**: the wire carries a 16-bit 50 m counter that wraps every 3276 km, so
 a consumer records its first reading and reports distance since. `EspDashSignals.h` does this for
@@ -154,7 +155,7 @@ you.
 | `0x156` sign | `−int16 / 10` | `int16 / 10` | On-road test (2026-08-09) showed left/right inverted. The magnitude (`/10`) was right; opendbc's negative factor did not carry over to this chassis |
 | `0x188` | `04`=P `01`=R `08`=N `00`=D `02`=S | `01`=P `02`=R `04`=N `08`=D `00`=S | On-road test (2026-08-09): every position was off by one against the physical selector. No external reference exists for this ID at all — see §A |
 | `0x21E` | ambient = `(int8)d[4]` | ambient = `d[3] − 40` | `d[4]` is a bitfield. Cycling the climate controls drives it through `00/21/60/80/81/A0` — **−128 °C to +96 °C on the gauge** — and it steps `0x20`→`0x60` mid-drive and stays. `0x20 = 32` only ever looked like a temperature because the two captures that "confirmed" it were both taken at ~32 °C |
-| `0x305` | battery = `d[0] × 100` mV | **not decoded** | `d[0]` is *exactly* `0x8E` (=142, "14.2 V") in four stationary captures spread over three weeks — never 141, never 143 — and `0x06`/`0x0E` (0.6 V / 1.4 V) throughout a 37-min drive. Real alternator output wanders with load; this does not vary at all. Values are bit patterns (`8E/4E/0E/06` share a low nibble, differ in bits 6–7), consistent with opendbc's `SEATBELT_STATUS` |
+| `0x305` | battery = `d[0] × 100` mV | **not battery — `SEATBELT_STATUS`** | `d[0]` is *exactly* `0x8E` (=142, "14.2 V") in four stationary captures spread over three weeks — never 141, never 143 — and `0x06`/`0x0E` (0.6 V / 1.4 V) throughout a 37-min drive. Values are bit patterns (`8E/4E/0E/06` in `d[0]` and `14/24` in `d[1]`), matching opendbc's `SEATBELT_STATUS` (`0x8E 0x14` unbuckled parked vs `0x0E 0x24` driver buckled driving). Battery voltage is now measured via the Gateway INA228 I2C sensor |
 | `PEDAL_GAS_FULL_SCALE` | `139` (2015 Si maximum) | `255` | Two deliberate WOT pulls into the limiter (2026-08-29, in Park) plateau at **211–213**, and the road log holds **214 then 255** for 4.5 s through one kickdown. At 139 the gauge reported 100 % from 55 % of real pedal travel |
 
 ---
@@ -188,7 +189,7 @@ the S gate and ECON on 2026-08-30 (§I).
 | `0x255` | 8 | 25 | `ROUGH_WHEEL_SPEED` (**no Honda checksum**) | `0x465` | 8 | 3.3 | — |
 | `0x294` | 8 | 25 | low-fuel lamp + turn signals ✅ | `0x510` | 8 | 2 | **blower fan** ✅ (this car only) |
 | `0x295` | 4 | 25 | — | `0x6C1` | 1 | 3.3 | — (this car only) |
-| `0x305` | 7 | 10 | flags — **not** battery | | | | |
+| `0x305` | 7 | 10 | `SEATBELT_STATUS` flags (**not** battery) | | | | |
 | `0x309` | 8 | 10 | `CAR_SPEED` (opendbc) | | | | |
 | `0x320` | 8 | 10 | — | | | | |
 

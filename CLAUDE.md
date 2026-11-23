@@ -17,8 +17,20 @@
   ~/.platformio/penv/bin/pio run -t upload --upload-port /dev/cu.usbmodem101 -d firmware/esp32-gateway
   ```
 
+- **Run Gateway Host Unit Tests (CAN Decode & Protocol):**
+  ```bash
+  ~/.platformio/penv/bin/pio test -e native -d firmware/esp32-gateway
+  ```
+- **Flash Display Nodes over USB:**
+  ```bash
+  # Example: ES3C35P 3.5" Touch + IMU + PFD
+  ~/.platformio/penv/bin/pio run -t upload --upload-port /dev/cu.usbmodem1101 -d firmware/display-nodes/esp-touch-350
+  # Example: CrowPanel 3.7" E-Paper (CH340 UART0 @ 460800)
+  ~/.platformio/penv/bin/pio run -t upload --upload-port /dev/cu.usbserial-210 -d firmware/display-nodes/crowpanel-epaper-370
+  ```
+
 ## Code Guidelines
 
 - **Safety First:** Central Gateway MUST maintain `TWAI_MODE_LISTEN_ONLY` when connected to vehicle CAN bus.
-- **Wireless Latency:** Use ESP-NOW binary multicast struct (`TelemetryPacket`, 32 bytes) for <3ms display update speeds.
-- **Zero Battery Drain:** Keep ESP32 deep sleep enabled on ignition OFF.
+- **Wireless Latency & Wire Protocol:** Use the shared `EspDashProto.h` v2.4 header (`8-byte EspDashHeader + 38-byte EspDashTelemetry = 46 bytes`) and `EspDashSignals.h` catalog in `firmware/shared/EspDashProto/`. Do not copy packet structs into nodes.
+- **Zero Battery Drain:** Keep ESP32-S3 gateway 2-tier Light/Deep Sleep enabled on CAN inactivity.

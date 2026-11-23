@@ -1,14 +1,10 @@
 # 📡 ArduinoOTA Wireless Firmware Deployment Guide
 
-> **Gateway OTA is disabled by default (2026-08-10).** The Central Gateway's Wi-Fi station degraded
-> its own ESP-NOW link to the display nodes on-car, so it now boots with Wi-Fi off entirely
-> (`ESPDASH_GATEWAY_WIFI=0` in `firmware/esp32-gateway/platformio.ini`) — USB + ESP-NOW only. The code
-> below is preserved and still works, but only after building the gateway with
-> `-DESPDASH_GATEWAY_WIFI=1` and reflashing it over USB first. See `docs/ARCHITECTURE.md` §5.2.
-> **Display nodes are unaffected** — the round gauge and future nodes still have Wi-Fi/OTA enabled by
-> default, as covered below.
+> **Wi-Fi / OTA is disabled by default on both Gateway and Display Nodes (`ESPDASH_GATEWAY_WIFI=0`, `ESPDASH_NODE_WIFI=0`).**
+> Associating to a router AP moves the ESP32 radio onto the AP's channel and causes missed ESP-NOW broadcasts when it differs from `ESPDASH_ESPNOW_CHANNEL` (`1`). By default all boards run in fixed-channel USB + ESP-NOW mode (`docs/ARCHITECTURE.md` §5.2).
+> To enable OTA on a board temporarily for bench work, set `-DESPDASH_GATEWAY_WIFI=1` or `-DESPDASH_NODE_WIFI=1` in that project's `platformio.ini` and flash once over USB first.
 
-All nodes in **espDash** feature background **ArduinoOTA / WebOTA** so firmware can be flashed wirelessly over any configured Wi-Fi network (`Complex_parking`, `Bazanski_ph`, `Bazanski_IS`, or `IOT-monday`) without disassembling dashboard trims or unplugging USB cables.
+When `ESPDASH_GATEWAY_WIFI=1` / `ESPDASH_NODE_WIFI=1` is enabled, nodes connect to any configured Wi-Fi network (`Complex_parking`, `Bazanski_ph`, `Bazanski_IS`, or `IOT-monday`) for **ArduinoOTA / WebOTA** wireless firmware updates.
 
 ---
 
@@ -25,15 +21,16 @@ All nodes in **espDash** feature background **ArduinoOTA / WebOTA** so firmware 
 
 ## 🌐 mDNS Hostname & Device Map
 
-| Device Node | Hardware Board | Target mDNS Hostname | Role |
+| Device Node | Hardware Board | Project Directory | Target mDNS / Port |
 | :--- | :--- | :--- | :--- |
-| **Central Gateway** | Waveshare ESP32-S3-RS485-CAN | `esp32-gateway.local` | CAN Transceiver Gateway |
-| **Display Node 1** | Waveshare ESP32-S3-LCD-3.16 | `esp32-gauge-3inch.local` | Universal Telemetry Gauge |
-| **Display Node 2** | XIAO ESP32-S3 + JXL Round | `esp32-gauge-round.local` | Universal Telemetry Gauge |
-| **Display Node 3** | Waveshare ESP32-S3-Touch-AMOLED-1.32 | `esp32-gauge-amoled.local` | Universal Touch Gauge |
-| **Display Node 4** | Waveshare ESP32-C6-LCD-1.47 (Touch/Non-Touch TBD) | `esp32-gauge-147.local` | Universal Telemetry Gauge |
-| **Display Node 5** | Generic ESP32-S3 + OLED | `esp32-oled.local` | Universal Gauge / Shift Light |
-| **Relay Node 6** | Heltec V3/V4 Meshtastic ESP32-S3 | `esp32-heltec-relay.local` | Home Assistant LoRa Bridge |
+| **Central Gateway** | Waveshare ESP32-S3-RS485-CAN (+ INA228) | `firmware/esp32-gateway` | `esp32-gateway.local` / USB CDC |
+| **Display Node 1** | Waveshare ESP32-S3-LCD-3.16 (+ SD Rec) | `firmware/display-nodes/esp-rectangular-314` | USB CDC |
+| **Display Node 2** | XIAO ESP32-S3 / S3-Zero + GC9A01 Round | `firmware/display-nodes/xiao-round-gauge` | `esp32-gauge-round.local` / USB CDC |
+| **Display Node 3** | Waveshare ESP32-S3-Touch-AMOLED-1.32 | `firmware/display-nodes/esp-round-amoled-touch` | USB CDC |
+| **Display Node 4** | XIAO / S3-Zero + Dual GC9A01 Round | `firmware/display-nodes/xiao-dual-round` | USB CDC |
+| **Display Node 5** | LCD Wiki ES3C35P 3.5" Touch + IMU | `firmware/display-nodes/esp-touch-350` | USB CDC |
+| **Display Node 6** | Elecrow CrowPanel 3.7" E-Paper (UC8253) | `firmware/display-nodes/crowpanel-epaper-370` | CH340 UART0 (`/dev/cu.usbserial-*`) |
+| **Planned Nodes** | ESP32-C6 1.47", OLED, Heltec LoRa | *Planned* | `esp32-gauge-147.local`, `esp32-oled.local`, `esp32-heltec-relay.local` |
 
 ---
 

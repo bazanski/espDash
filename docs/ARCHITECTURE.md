@@ -11,9 +11,10 @@
 The central ESP32-S3 gateway maintains two concurrent output channels:
 
 1. **ESP-NOW 2.4 GHz Peer-to-Peer Multicast Broadcast:**
-   * Transmits a compact **8-byte header + 30-byte telemetry body** at 20Hz–50Hz to in-car display nodes (~1-3ms latency, zero connection handshake wait).
+   * Transmits a compact **8-byte header + 38-byte telemetry body (46 bytes total, proto v2.4)** at 20Hz to in-car display nodes (~1-3ms latency, zero connection handshake wait) on fixed channel `ESPDASH_ESPNOW_CHANNEL` (`1`).
+   * Also supports on-demand batched raw CAN log streaming (`ESPDASH_MSG_CANLOG` / `ESPDASH_MSG_CANLOG_IDS`) controlled by upstream `ESPDASH_MSG_NODE_CMD` advertisements from the SD recorder node.
 2. **WebSocket / WebSerial Debug Channel (Port 8888):**
-   * Serves live telemetry JSON and raw CAN frames to the web dashboard on laptop/tablet over Wi-Fi (`10.0.0.43` / `esp32-gateway.local`) or USB WebSerial (`navigator.serial`).
+   * Serves 10Hz live telemetry JSON and raw CAN frames to the web dashboard on laptop/tablet over USB WebSerial (`navigator.serial`, default) or Wi-Fi (`esp32-gateway.local` when built with `-DESPDASH_GATEWAY_WIFI=1`).
 
 ---
 
@@ -23,8 +24,8 @@ The central ESP32-S3 gateway maintains two concurrent output channels:
 the gateway and by every display node; the struct is never copied into a node. The block below is a
 reader's summary — if it and the header ever disagree, the header is right.
 
-Wire format is an 8-byte `EspDashHeader` followed by a 30-byte `EspDashTelemetry` body
-(proto v2.1). The layout is **append-only**: receivers gate on `payload_len` via `ESPDASH_HAS()`,
+Wire format is an 8-byte `EspDashHeader` followed by a 38-byte `EspDashTelemetry` body
+(proto v2.4). The layout is **append-only**: receivers gate on `payload_len` via `ESPDASH_HAS()`,
 so an old node ignores trailing fields from a new gateway and a new node skips fields an old
 gateway does not send. Neither goes dark, and no field below may be reordered or removed.
 
@@ -35,9 +36,9 @@ typedef struct __attribute__((packed)) {
     uint16_t speed_kmh_x10;        // 0-3000 = 0-300.0 km/h
     int16_t  water_temp_x10;       // -40.0 .. +150.0 C
     int16_t  oil_temp_x10;         // NOT on the broadcast bus - stays 0
-    uint16_t battery_mv;           // NO CAN SOURCE - stays 0, see below
-    uint8_t  gear;                 // 0=P 1=R 2=N 3=D 4=S
-    uint8_t  fuel_consumption_x10; // INSTANT consumption, L/100km x10 (94 = 9.4)
+    uint16_t battery_mv;           // millivolts from Gateway INA228 I2C sensor (0 if absent)
+    uint8_t  gear;                 // selector: 0=P 1=R 2=N 3=D 4=S
+    uint8_t  fuel_consumption_x10; // TRIP-AVERAGE consumption, L/100km x10 (94 = 9.4)
                                    // NOT tank level - see below
     int16_t  steering_deg;         // signed, negative = left
     int8_t   ambient_temp;         // whole degrees C
@@ -52,15 +53,20 @@ typedef struct __attribute__((packed)) {
                                    // 1 count = 1 % of 50 L; 105 = brimmed, clamped)
     uint8_t  gear_num;             // engaged gear 1-5, 0 = none/shifting
     uint8_t  flags2;               // LOW_FUEL / ECON / SPORT / TURN_L / TURN_R
-                                   // / FUEL_VALID
+                                   // / FUEL_VALID / ODO_VALID
+    // ---- added in v2.4 --------------------------------------------------
+    uint16_t odo_50m;              // distance counter, 50 m/count (wraps at 3276 km; use deltas)
+    int8_t   cabin_temp;           // in-car temperature, whole degrees C
+    uint8_t  fan_speed;            // blower 0-7
+    uint8_t  lights;               // 0=DRL 1=POS 2=LOW 3=HIGH
 } EspDashTelemetry;
 ```
 
 **Minor 2 is deliberately skipped.** An unmerged branch (`feature/xiao-dual-round-gauge`) already
-published a v2.2 with a *different* field at offset 30. Jumping to 2.3 keeps the guarantee that a
-version number identifies exactly one layout.
+published a v2.2 with a *different* field at offset 30. Jumping to 2.3 (and now 2.4) keeps the
+guarantee that a version number identifies exactly one layout.
 
-### Three fields that are deliberately empty or renamed
+### Three fields with important caveats
 
 These are the ones that trip people up, so they are called out here rather than only in the
 protocol map:
@@ -68,8 +74,8 @@ protocol map:
 | Field | State | Why |
 |---|---|---|
 | `oil_temp_x10` | always 0 | Not broadcast at all. Exists only as a Mode-22 diagnostic PID, which needs a transmitted request; the gateway is listen-only by design |
-| `battery_mv` | always 0 since 2026-08-29 | `0x305` byte 0 was read as 100 mV/count. It is *exactly* 142 ("14.2 V") in four stationary captures three weeks apart and 6–14 across a whole drive — a bitfield, not a measurement. Retracted; UIs must render a blank, not `0.0 V` |
-| `fuel_consumption_x10` | **trip average**, not tank level and not a live figure | Renamed from `fuel_pct` on 2026-08-15; the name is now kept only for wire compatibility. It is the trip-average consumption in L/100km ×10 — two WOT pulls move it by one count (`CAN_PROTOCOL_MAP.md` §H). **Tank level is not broadcast on this car's bus at all** — exhaustively ruled out on 2026-08-29 (§G). A live instantaneous figure has to be *computed*; this byte cannot supply one |
+| `battery_mv` | live from Gateway **INA228 I2C** sensor (`0` if sensor absent) | CAN `0x305` byte 0 was retracted on 2026-08-29 (`0x305` is `SEATBELT_STATUS`, not voltage). The gateway now measures the 12 V rail directly via an INA228 on I2C (`SDA=GPIO1`, `SCL=GPIO2`, addr `0x40`) at 10 Hz (`INA` / `I2C:SCAN` serial commands). Display nodes should render `--.- V` when `0` |
+| `fuel_consumption_x10` | **trip average**, not tank level and not a live figure | Renamed from `fuel_pct` on 2026-08-15; the name is kept only for wire compatibility. It is the trip-average consumption in L/100km ×10 (`CAN_PROTOCOL_MAP.md` §H). Actual tank level is carried separately in `fuel_level_pct` (`0x1A6` byte 3, added in v2.3) |
 
 ### 2.1 The signal catalog — how screens get laid out
 
@@ -139,15 +145,17 @@ working rules come out of that document and belong here too:
 
 ---
 
-## 4. Future Expansion & Sensor Roadmap
+## 4. Power Management, Sensors & IMU Integration
 
-### 📍 GY-BNO08X (BNO080 / BNO085) 9-DOF IMU Integration (Investigate Phase)
-* **Objective:** Connect a GY-BNO08X 9-axis Motion Sensor (I2C / SPI) to the Central ESP32-S3 Gateway.
-* **Capabilities:**
-  * **3-Axis Acceleration & G-Force Values:** Real-time lateral/longitudinal G-force monitoring for performance cornering and acceleration.
-  * **Vehicle Pitch & Roll Tilt Angle:** Track incline, slope, and body roll dynamics.
-  * **Parking Hit & Shock Detection:** Ultra-low-power accelerometer wake-up mode to detect parking bumps, impacts, or tampering while the vehicle is parked.
-  * **Telemetry Payload Integration:** Extend `TelemetryPacket` with `int16_t g_force_x_mg`, `int16_t g_force_y_mg`, `int16_t pitch_deg_x10`, `int16_t roll_deg_x10`.
+### Gateway Automatic Power Saving (Ignition-Off Protection)
+* **2-Tier Sleep State Machine (`firmware/esp32-gateway`):** Monitors CAN bus activity (`last_can_rx_ms`), controlled via `POWER:AUTO` (default), `POWER:AWAKE`, and `POWER?`:
+  * **Tier 1 (25 s CAN silence):** Flushes logs, suspends worker tasks, shuts down TWAI and Wi-Fi/ESP-NOW radios, and enters **Light Sleep** with `<1 ms` hardware wake-up on `GPIO 16` (`CAN_RX`).
+  * **Tier 2 (30 min continuous silence):** Escalates to **Deep Sleep** (~15 µA core draw) with RTC EXT0 wake on `GPIO 16`.
+* **12 V Battery Voltage Sensor (INA228):** Connected to the Gateway over I2C (`SDA=GPIO1`, `SCL=GPIO2`, address `0x40`), polled at 10 Hz into `battery_mv`.
+
+### On-Node IMU Integration (`esp-touch-350`) & Future Gateway IMU
+* **Implemented on `esp-touch-350`:** MPU-6500 (auto-detects MPU-9250 + AK8963 magnetometer) on the touch I2C bus (`IO38`/`IO39`, guarded by `bsp/i2c_lock.h`), sampled at 200 Hz with Mahony sensor fusion in vehicle coordinates, driving the IMU diagnostic screen and the Airbus-style PFD attitude/G-load display.
+* **Future Gateway GY-BNO08X Integration (Planned):** Optional 9-DOF sensor on the Central Gateway for fleet-wide G-force/tilt broadcast (`ESPDASH_MSG_IMU`) and parking shock detection.
 
 ---
 
@@ -216,36 +224,22 @@ is likely to be wanted again for some future use case. Setting `-DESPDASH_GATEWA
 rebuilding restores it exactly; both configurations are verified to compile (default: 16.4% RAM /
 20.9% flash; flag on: 18.5% / 23.4%, matching the pre-§5.2 build almost exactly).
 
-**Consequences:** every gateway flash now requires USB unless the flag is re-enabled — no more OTA at
-the default setting. The web dashboard's WebSocket connection mode will fail to connect against the
-gateway at the default setting (fails cleanly, doesn't crash); WebSerial (already implemented, already
-tested working) is the practical path unless the flag is flipped back. `docs/OTA_UPDATE_GUIDE.md` and
-`CLAUDE.md` are updated accordingly. Display node Wi-Fi (the round gauge's own OTA/WebOTA) is
-untouched by this — kept intentionally, to be revisited separately.
+**Consequences:** Every gateway flash now uses USB unless `-DESPDASH_GATEWAY_WIFI=1` is re-enabled. Display nodes have likewise been updated to default to `-DESPDASH_NODE_WIFI=0` in their `platformio.ini` files so every node stays locked on `ESPDASH_ESPNOW_CHANNEL` (`1`) without AP channel-mismatch drops (`docs/OTA_UPDATE_GUIDE.md` and `CLAUDE.md` reflect this).
 
-**Not yet known:** whether removing the gateway's Wi-Fi alone resolves the on-car instability, or
-whether the display node's own Wi-Fi (still enabled) was also contributing — the node scans/
-associates on its own radio independent of what the gateway does, which could produce a very similar
-symptom. If drops persist with the gateway's Wi-Fi off, that's the next thing to isolate, followed by
-RF/EMI in the car itself (antenna placement relative to the ignition system/alternator) if node Wi-Fi
-removal doesn't resolve it either.
+### 5.3 Hardware & Display Node Fleet
 
-> **Universal Gauge Design:** All display nodes run a universal, configurable telemetry display engine capable of rendering gauges, digital readouts, bar graphs, and warnings. Display nodes are currently general-purpose telemetry gauges; specific dedicated functions will be assigned in future iterations.
-
-* **Gateway:** `esp32-gateway.local` (Waveshare ESP32-S3-RS485-CAN)
-* **Node 1:** `esp32-gauge-3inch.local` (Waveshare ESP32-S3-LCD-3.16 — Universal Telemetry Display)
-* **Node 2:** `esp32-gauge-round.local` (Seeed XIAO ESP32-S3 + JXL Round — Universal Circular Gauge)
-* **Node 3:** `esp32-gauge-amoled.local` (Waveshare ESP32-S3-Touch-AMOLED-1.32 — Universal Touch Gauge)
-* **Node 4:** `esp32-gauge-147.local` (Waveshare ESP32-C6-LCD-1.47 — Universal Telemetry Display, Touch or Non-Touch TBD)
-* **Node 5:** `esp32-oled.local` (Generic ESP32-S3 + I2C OLED — Universal Gauge / Shift Light)
-* **Node 6:** `esp32-heltec-relay.local` (Heltec Meshtastic LoRa Bridge to Home Assistant)
-* **Node 7:** `esp32-gauge-dual-round.local` (Seeed XIAO ESP32-S3 + 2× GC9A01 240×240 round,
-  shared SPI bus — Dual Circular Gauge: Panel A driving / Panel B efficiency). The first
-  two-display node in the codebase: LVGL is configured for a single 240×480 virtual display,
-  and `flush_cb` splits each invalidated area across the two physical panels (rows 0–239 to
-  panel A, rows 240–479 to panel B) — see `firmware/display-nodes/xiao-dual-round/src/main.cpp`.
-  Node Wi-Fi/mDNS is not wired up on this node (always off), so the hostname above does not
-  currently resolve; listed for naming consistency with the rest of the fleet.
+* **Gateway:** `esp32-gateway.local` (`firmware/esp32-gateway`, Waveshare ESP32-S3-RS485-CAN + INA228 12 V I2C sensor)
+* **Implemented Display Nodes (`firmware/display-nodes/`):**
+  1. `esp-rectangular-314` — Waveshare ESP32-S3-LCD-3.16 (ST7701 RGB LCD + QMI8658 IMU + SD_MMC wireless raw CAN recorder)
+  2. `xiao-round-gauge` — Seeed XIAO ESP32-S3 / ESP32-S3-Zero + GC9A01 240×240 Round SPI TFT (dual-screen carousel: EEZ LVGL UI + catalog-driven `TFT_eSprite` UI)
+  3. `xiao-dual-round` — Seeed XIAO ESP32-S3 / ESP32-S3-Zero + 2× GC9A01 240×240 round panels on shared SPI as a 240×480 virtual LVGL display
+  4. `esp-round-amoled-touch` — Waveshare ESP32-S3-Touch-AMOLED-1.32 (466×466 CO5300 QSPI AMOLED + CST820 Touch, Eco Coach UI)
+  5. `esp-touch-350` — LCD Wiki ES3C35P 3.5" 480×320 QSPI Capacitive Touch LCD + MPU-6500/9250 IMU (3 pages: Car Data, IMU Diagnostics, Airbus PFD)
+  6. `crowpanel-epaper-370` — Elecrow CrowPanel 3.7" E-Paper (`ESP32-S3-WROOM-1-N8R8`, UC8253 416×240 B&W slow-data dash: Fuel/Range/Trip/Climate, Session Health/Service, and 0 mA Parked Snapshot + Catalog Matrix, with smart partial/full refresh)
+* **Planned / Pending Nodes:**
+  * `esp32-gauge-147.local` — Waveshare ESP32-C6-LCD-1.47
+  * `esp32-oled.local` — Generic ESP32-S3 + I2C OLED shift light
+  * `esp32-heltec-relay.local` — Heltec V3/V4 Meshtastic LoRa Bridge to Home Assistant
 
 ## 6. Display node UI sources (EEZ Studio)
 
